@@ -1,0 +1,503 @@
+{
+  "$schema": "https://vega.github.io/schema/vega/v5.json",
+  "description": "LendPath Mortgage Platform — APM Service Network Topology",
+  "width": 900,
+  "height": 600,
+  "padding": 20,
+  "autosize": "none",
+
+  "signals": [
+    {"name": "cx", "update": "width / 2"},
+    {"name": "cy", "update": "height / 2"},
+    {
+      "name": "nodeRadius", "value": 36
+    },
+    {
+      "name": "selectedNode", "value": null,
+      "on": [
+        {"events": "symbol:click", "update": "datum.id"},
+        {"events": "view:click[!event.item]", "update": "null"}
+      ]
+    }
+  ],
+
+  "data": [
+    {
+      "name": "node-defs",
+      "values": [
+        {
+          "id": "lendpath-los",
+          "label": "lendpath-los",
+          "group": "app",
+          "tier": "entry",
+          "x": 450, "y": 80,
+          "color": "#0077CC",
+          "icon": "⚙"
+        },
+        {
+          "id": "lendpath-underwriting",
+          "label": "lendpath-\nunderwriting",
+          "group": "app",
+          "tier": "service",
+          "x": 200, "y": 230,
+          "color": "#0077CC",
+          "icon": "⚙"
+        },
+        {
+          "id": "lendpath-credit-service",
+          "label": "lendpath-\ncredit-service",
+          "group": "app",
+          "tier": "service",
+          "x": 450, "y": 230,
+          "color": "#0077CC",
+          "icon": "⚙"
+        },
+        {
+          "id": "lendpath-document-service",
+          "label": "lendpath-\ndocument-service",
+          "group": "app",
+          "tier": "service",
+          "x": 700, "y": 230,
+          "color": "#0077CC",
+          "icon": "⚙"
+        },
+        {
+          "id": "lendpath-appraisal-service",
+          "label": "lendpath-\nappraisal-service",
+          "group": "app",
+          "tier": "service",
+          "x": 870, "y": 380,
+          "color": "#0077CC",
+          "icon": "⚙"
+        },
+        {
+          "id": "oracle:1521",
+          "label": "Oracle DB\n:1521",
+          "group": "db",
+          "tier": "infra",
+          "x": 200, "y": 430,
+          "color": "#C74B16",
+          "icon": "🗄"
+        },
+        {
+          "id": "kafka:9092",
+          "label": "Kafka\n:9092",
+          "group": "messaging",
+          "tier": "infra",
+          "x": 100, "y": 530,
+          "color": "#7B5EA7",
+          "icon": "✉"
+        },
+        {
+          "id": "redis:6379",
+          "label": "Redis\n:6379",
+          "group": "cache",
+          "tier": "infra",
+          "x": 450, "y": 530,
+          "color": "#C0392B",
+          "icon": "⚡"
+        },
+        {
+          "id": "s3.amazonaws.com:443",
+          "label": "AWS S3\n:443",
+          "group": "storage",
+          "tier": "infra",
+          "x": 700, "y": 430,
+          "color": "#E67E22",
+          "icon": "☁"
+        },
+        {
+          "id": "api.experian.com:443",
+          "label": "Experian API\n:443",
+          "group": "external",
+          "tier": "external",
+          "x": 340, "y": 530,
+          "color": "#27AE60",
+          "icon": "🌐"
+        },
+        {
+          "id": "api.equifax.com:443",
+          "label": "Equifax API\n:443",
+          "group": "external",
+          "tier": "external",
+          "x": 560, "y": 530,
+          "color": "#27AE60",
+          "icon": "🌐"
+        },
+        {
+          "id": "api.corelogic.com:443",
+          "label": "CoreLogic API\n:443",
+          "group": "external",
+          "tier": "external",
+          "x": 870, "y": 530,
+          "color": "#27AE60",
+          "icon": "🌐"
+        }
+      ]
+    },
+    {
+      "name": "edge-defs",
+      "values": [
+        {"source": "lendpath-los",               "target": "lendpath-underwriting",     "label": "HTTP"},
+        {"source": "lendpath-los",               "target": "lendpath-credit-service",   "label": "HTTP"},
+        {"source": "lendpath-los",               "target": "lendpath-document-service", "label": "HTTP"},
+        {"source": "lendpath-los",               "target": "lendpath-appraisal-service","label": "HTTP"},
+        {"source": "lendpath-los",               "target": "oracle:1521",               "label": "SQL"},
+        {"source": "lendpath-los",               "target": "redis:6379",                "label": "Cache"},
+        {"source": "lendpath-underwriting",      "target": "oracle:1521",               "label": "SQL"},
+        {"source": "lendpath-underwriting",      "target": "kafka:9092",                "label": "Produce"},
+        {"source": "lendpath-underwriting",      "target": "redis:6379",                "label": "Cache"},
+        {"source": "lendpath-credit-service",    "target": "oracle:1521",               "label": "SQL"},
+        {"source": "lendpath-credit-service",    "target": "api.experian.com:443",      "label": "HTTP"},
+        {"source": "lendpath-credit-service",    "target": "api.equifax.com:443",       "label": "HTTP"},
+        {"source": "lendpath-credit-service",    "target": "redis:6379",                "label": "Cache"},
+        {"source": "lendpath-document-service",  "target": "oracle:1521",               "label": "SQL"},
+        {"source": "lendpath-document-service",  "target": "s3.amazonaws.com:443",      "label": "S3"},
+        {"source": "lendpath-appraisal-service", "target": "oracle:1521",               "label": "SQL"},
+        {"source": "lendpath-appraisal-service", "target": "api.corelogic.com:443",     "label": "HTTP"},
+        {"source": "lendpath-appraisal-service", "target": "redis:6379",                "label": "Cache"}
+      ]
+    },
+    {
+      "name": "edges-with-coords",
+      "source": "edge-defs",
+      "transform": [
+        {
+          "type": "lookup",
+          "from": "node-defs",
+          "key": "id",
+          "fields": ["source"],
+          "as": ["src_node"]
+        },
+        {
+          "type": "lookup",
+          "from": "node-defs",
+          "key": "id",
+          "fields": ["target"],
+          "as": ["tgt_node"]
+        },
+        {
+          "type": "formula",
+          "as": "x1",
+          "expr": "datum.src_node.x"
+        },
+        {
+          "type": "formula",
+          "as": "y1",
+          "expr": "datum.src_node.y"
+        },
+        {
+          "type": "formula",
+          "as": "x2",
+          "expr": "datum.tgt_node.x"
+        },
+        {
+          "type": "formula",
+          "as": "y2",
+          "expr": "datum.tgt_node.y"
+        },
+        {
+          "type": "formula",
+          "as": "mx",
+          "expr": "(datum.x1 + datum.x2) / 2"
+        },
+        {
+          "type": "formula",
+          "as": "my",
+          "expr": "(datum.y1 + datum.y2) / 2"
+        },
+        {
+          "type": "formula",
+          "as": "highlighted",
+          "expr": "selectedNode != null && (datum.source == selectedNode || datum.target == selectedNode)"
+        }
+      ]
+    },
+    {
+      "name": "nodes-display",
+      "source": "node-defs",
+      "transform": [
+        {
+          "type": "formula",
+          "as": "highlighted",
+          "expr": "selectedNode != null && datum.id == selectedNode"
+        },
+        {
+          "type": "formula",
+          "as": "connected",
+          "expr": "selectedNode != null && length(data('edges-with-coords')[datum.id == data('edges-with-coords').source || datum.id == data('edges-with-coords').target].filter(e => e.source == selectedNode || e.target == selectedNode)) > 0"
+        },
+        {
+          "type": "formula",
+          "as": "opacity",
+          "expr": "selectedNode == null ? 1 : (datum.id == selectedNode ? 1 : 0.35)"
+        }
+      ]
+    }
+  ],
+
+  "marks": [
+    {
+      "name": "title-text",
+      "type": "text",
+      "encode": {
+        "enter": {
+          "x": {"value": 450},
+          "y": {"value": 22},
+          "align": {"value": "center"},
+          "baseline": {"value": "middle"},
+          "text": {"value": "LendPath Mortgage — Service Network Topology"},
+          "font": {"value": "Arial, sans-serif"},
+          "fontSize": {"value": 16},
+          "fontWeight": {"value": "bold"},
+          "fill": {"value": "#1a2332"}
+        }
+      }
+    },
+    {
+      "name": "edges",
+      "type": "rule",
+      "from": {"data": "edges-with-coords"},
+      "encode": {
+        "update": {
+          "x":           {"field": "x1"},
+          "y":           {"field": "y1"},
+          "x2":          {"field": "x2"},
+          "y2":          {"field": "y2"},
+          "stroke":      [
+            {"test": "datum.highlighted", "value": "#0077CC"},
+            {"value": "#c8d4e3"}
+          ],
+          "strokeWidth": [
+            {"test": "datum.highlighted", "value": 2.5},
+            {"value": 1.5}
+          ],
+          "strokeOpacity": [
+            {"test": "selectedNode == null", "value": 0.5},
+            {"test": "datum.highlighted", "value": 1},
+            {"value": 0.15}
+          ]
+        }
+      }
+    },
+    {
+      "name": "arrowheads",
+      "type": "symbol",
+      "from": {"data": "edges-with-coords"},
+      "encode": {
+        "update": {
+          "x":     {"field": "x2"},
+          "y":     {"field": "y2"},
+          "shape": {"value": "triangle"},
+          "angle": {
+            "signal": "atan2(datum.y2 - datum.y1, datum.x2 - datum.x1) * 180 / PI + 90"
+          },
+          "size":  {"value": 80},
+          "fill":  [
+            {"test": "datum.highlighted", "value": "#0077CC"},
+            {"value": "#c8d4e3"}
+          ],
+          "fillOpacity": [
+            {"test": "selectedNode == null", "value": 0.6},
+            {"test": "datum.highlighted", "value": 1},
+            {"value": 0.15}
+          ]
+        }
+      }
+    },
+    {
+      "name": "edge-labels",
+      "type": "text",
+      "from": {"data": "edges-with-coords"},
+      "encode": {
+        "update": {
+          "x":          {"field": "mx"},
+          "y":          {"field": "my"},
+          "text":       {"field": "label"},
+          "align":      {"value": "center"},
+          "baseline":   {"value": "middle"},
+          "font":       {"value": "Arial, sans-serif"},
+          "fontSize":   {"value": 9},
+          "fill":       [
+            {"test": "datum.highlighted", "value": "#0077CC"},
+            {"value": "#8899aa"}
+          ],
+          "fillOpacity": [
+            {"test": "selectedNode == null", "value": 0.8},
+            {"test": "datum.highlighted", "value": 1},
+            {"value": 0.2}
+          ],
+          "dx": {"value": 6}
+        }
+      }
+    },
+    {
+      "name": "node-shadow",
+      "type": "symbol",
+      "from": {"data": "nodes-display"},
+      "encode": {
+        "update": {
+          "x":           {"field": "x"},
+          "y":           {"field": "y"},
+          "shape":       {"value": "circle"},
+          "size":        {"signal": "pow(nodeRadius * 2 + 8, 2)"},
+          "fill":        {"value": "#000"},
+          "fillOpacity": {"value": 0.08},
+          "dx":          {"value": 3},
+          "dy":          {"value": 3}
+        }
+      }
+    },
+    {
+      "name": "node-circles",
+      "type": "symbol",
+      "from": {"data": "nodes-display"},
+      "encode": {
+        "enter": {
+          "cursor": {"value": "pointer"}
+        },
+        "update": {
+          "x":     {"field": "x"},
+          "y":     {"field": "y"},
+          "shape": {"value": "circle"},
+          "size":  {"signal": "pow(nodeRadius * 2, 2)"},
+          "fill":  [
+            {"test": "datum.highlighted", "value": "#e8f4ff"},
+            {"value": "#ffffff"}
+          ],
+          "stroke": {"field": "color"},
+          "strokeWidth": [
+            {"test": "datum.highlighted", "value": 3.5},
+            {"value": 2}
+          ],
+          "fillOpacity":   {"field": "opacity"},
+          "strokeOpacity": {"field": "opacity"}
+        }
+      }
+    },
+    {
+      "name": "tier-badges",
+      "type": "symbol",
+      "from": {"data": "nodes-display"},
+      "encode": {
+        "update": {
+          "x":     {"signal": "datum.x"},
+          "y":     {"signal": "datum.y - nodeRadius + 10"},
+          "shape": {"value": "circle"},
+          "size":  {"value": 200},
+          "fill":  {"field": "color"},
+          "fillOpacity": {"field": "opacity"}
+        }
+      }
+    },
+    {
+      "name": "node-labels",
+      "type": "text",
+      "from": {"data": "nodes-display"},
+      "encode": {
+        "update": {
+          "x":          {"field": "x"},
+          "y":          {"signal": "datum.y + nodeRadius + 14"},
+          "text":       {"field": "label"},
+          "align":      {"value": "center"},
+          "baseline":   {"value": "top"},
+          "font":       {"value": "Arial, sans-serif"},
+          "fontSize":   {"value": 10},
+          "fontWeight": [
+            {"test": "datum.highlighted", "value": "bold"},
+            {"value": "normal"}
+          ],
+          "fill":       {"field": "color"},
+          "fillOpacity":{"field": "opacity"},
+          "lineBreak":  {"value": "\n"}
+        }
+      }
+    },
+    {
+      "name": "group-label-app",
+      "type": "text",
+      "encode": {
+        "enter": {
+          "x": {"value": 20}, "y": {"value": 58},
+          "text": {"value": "APPLICATION SERVICES"},
+          "font": {"value": "Arial, sans-serif"},
+          "fontSize": {"value": 9},
+          "fontWeight": {"value": "bold"},
+          "fill": {"value": "#0077CC"},
+          "opacity": {"value": 0.5},
+          "letterSpacing": {"value": 1.5}
+        }
+      }
+    },
+    {
+      "name": "group-label-infra",
+      "type": "text",
+      "encode": {
+        "enter": {
+          "x": {"value": 20}, "y": {"value": 408},
+          "text": {"value": "INFRASTRUCTURE"},
+          "font": {"value": "Arial, sans-serif"},
+          "fontSize": {"value": 9},
+          "fontWeight": {"value": "bold"},
+          "fill": {"value": "#666"},
+          "opacity": {"value": 0.5},
+          "letterSpacing": {"value": 1.5}
+        }
+      }
+    },
+    {
+      "name": "group-label-external",
+      "type": "text",
+      "encode": {
+        "enter": {
+          "x": {"value": 20}, "y": {"value": 508},
+          "text": {"value": "EXTERNAL SERVICES"},
+          "font": {"value": "Arial, sans-serif"},
+          "fontSize": {"value": 9},
+          "fontWeight": {"value": "bold"},
+          "fill": {"value": "#27AE60"},
+          "opacity": {"value": 0.5},
+          "letterSpacing": {"value": 1.5}
+        }
+      }
+    },
+    {
+      "name": "legend-items",
+      "type": "group",
+      "encode": {
+        "enter": {
+          "x": {"value": 20},
+          "y": {"value": 555}
+        }
+      },
+      "marks": [
+        {
+          "type": "symbol",
+          "encode": {
+            "enter": [
+              {"x": {"value": 0},   "y": {"value": 0}, "shape": {"value": "circle"}, "size": {"value": 120}, "fill": {"value": "#fff"}, "stroke": {"value": "#0077CC"}, "strokeWidth": {"value": 2}},
+              {"x": {"value": 100}, "y": {"value": 0}, "shape": {"value": "circle"}, "size": {"value": 120}, "fill": {"value": "#fff"}, "stroke": {"value": "#C74B16"}, "strokeWidth": {"value": 2}},
+              {"x": {"value": 200}, "y": {"value": 0}, "shape": {"value": "circle"}, "size": {"value": 120}, "fill": {"value": "#fff"}, "stroke": {"value": "#7B5EA7"}, "strokeWidth": {"value": 2}},
+              {"x": {"value": 300}, "y": {"value": 0}, "shape": {"value": "circle"}, "size": {"value": 120}, "fill": {"value": "#fff"}, "stroke": {"value": "#C0392B"}, "strokeWidth": {"value": 2}},
+              {"x": {"value": 400}, "y": {"value": 0}, "shape": {"value": "circle"}, "size": {"value": 120}, "fill": {"value": "#fff"}, "stroke": {"value": "#E67E22"}, "strokeWidth": {"value": 2}},
+              {"x": {"value": 500}, "y": {"value": 0}, "shape": {"value": "circle"}, "size": {"value": 120}, "fill": {"value": "#fff"}, "stroke": {"value": "#27AE60"}, "strokeWidth": {"value": 2}}
+            ]
+          }
+        },
+        {
+          "type": "text",
+          "encode": {
+            "enter": [
+              {"x": {"value": 16},  "y": {"value": 4}, "text": {"value": "Java Service"},    "font": {"value": "Arial"}, "fontSize": {"value": 9}, "fill": {"value": "#0077CC"}},
+              {"x": {"value": 116}, "y": {"value": 4}, "text": {"value": "Oracle DB"},        "font": {"value": "Arial"}, "fontSize": {"value": 9}, "fill": {"value": "#C74B16"}},
+              {"x": {"value": 216}, "y": {"value": 4}, "text": {"value": "Kafka"},            "font": {"value": "Arial"}, "fontSize": {"value": 9}, "fill": {"value": "#7B5EA7"}},
+              {"x": {"value": 316}, "y": {"value": 4}, "text": {"value": "Redis"},            "font": {"value": "Arial"}, "fontSize": {"value": 9}, "fill": {"value": "#C0392B"}},
+              {"x": {"value": 416}, "y": {"value": 4}, "text": {"value": "Storage"},          "font": {"value": "Arial"}, "fontSize": {"value": 9}, "fill": {"value": "#E67E22"}},
+              {"x": {"value": 516}, "y": {"value": 4}, "text": {"value": "External API"},     "font": {"value": "Arial"}, "fontSize": {"value": 9}, "fill": {"value": "#27AE60"}}
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
