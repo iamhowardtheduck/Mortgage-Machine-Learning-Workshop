@@ -369,7 +369,7 @@ def build_es_client(host: str, user: str, password: str, verify_ssl: bool):
     )
 
 
-def run(host, user, password, verify_ssl, rate, once):
+def run(host, user, password, verify_ssl, rate, once, purge=False):
     es = build_es_client(host, user, password, verify_ssl)
     try:
         info = es.info()
@@ -377,6 +377,16 @@ def run(host, user, password, verify_ssl, rate, once):
     except Exception as e:
         print(f"Cannot connect: {e}")
         sys.exit(1)
+
+    if purge:
+        print("Purging traces-apm-mortgage (removing stale SDG-generated traces)…")
+        try:
+            es.indices.delete(index="traces-apm-mortgage", ignore_unavailable=True)
+            print("  ✓ Deleted traces-apm-mortgage data stream")
+        except Exception as e:
+            print(f"  ⚠ Could not delete data stream: {e}")
+            print("    Continuing anyway — new linked traces will be added alongside old ones.")
+        print()
 
     service_names = list(SERVICES.keys())
     # Weight initiating services toward lendpath-los (the entry point)
@@ -431,9 +441,13 @@ def main():
                    help="Traces per second (default: 2)")
     p.add_argument("--once",          action="store_true",
                    help="Generate ~100 traces then exit (useful for initial seeding)")
+    p.add_argument("--purge",         action="store_true",
+                   help="Delete all existing documents from traces-apm-mortgage "
+                        "before starting. Use this to clear out stale SDG-generated "
+                        "unlinked traces that break the APM Service Map.")
     args = p.parse_args()
     run(args.host, args.user, args.password,
-        not args.no_verify_ssl, args.rate, args.once)
+        not args.no_verify_ssl, args.rate, args.once, args.purge)
 
 
 if __name__ == "__main__":
