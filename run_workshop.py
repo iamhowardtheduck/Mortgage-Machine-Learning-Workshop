@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""
+run_workshop.py — Launches both the SDG and APM trace generator together.
+
+Runs sdg-prime.py and apm_trace_generator.py as child processes with a
+shared stop signal (Ctrl+C). Both processes write to the same Elasticsearch
+cluster. Status is printed every 10 seconds.
+
+Usage:
+    python run_workshop.py \\
+        --host https://localhost:9200 \\
+        --user elastic --password changeme \\
+        --no-verify-ssl \\
+        [--sdg-config mortgage-workshop.yml] \\
+        [--apm-rate 2]
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+import signal
+
+
+def tail_log(path, n=5):
+    """Return the last n non-empty lines of a log file."""
+    try:
+        with open(path) as f:
+            lines = [l.rstrip() for l in f.readlines() if l.strip()]
+        return lines[-n:] if lines else []
+    except Exception:
+        return []
+
+
+def run(host, user, password, verify_ssl, sdg_config, apm_rate):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    sdg_script   = os.path.join(script_dir, "sdg-prime.py")
+    apm_script   = os.path.join(script_dir, "apm_trace_generator.py")
+    sdg_log_path = os.path.join(script_dir, "sdg.log")
+    apm_log_path = os.path.join(script_dir, "apm.log")
+
+    for script in (sdg_script, apm_script):
+        if not os.path.exists(script):
+            print(f"ERROR: {script} not found in {script_dir}")
+            sys.exit(1)
+
+    python = sys.executable
+
+    # ── Build argument lists ──────────────────────────────────────────────────
+    sdg_cmd = [python, sdg_script, sdg_config]
+
+    apm_cmd = [
+        python, apm_script,
+        "--host",     host,
+        "--user",     user,
+        "--password", password,
+        "--rate",     str(apm_rate),
+    ]
+    if not verify_ssl:
+        apm_cmd.append("--no-verify-ssl")
+
+    # ── Launch ────────────────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("  LendPath ML Workshop — Data Generators")
+    print("=" * 60)
+    print(f"\n  SDG config:  {sdg_config}")
+    print(f"  APM rate:    {apm_rate} trace(s)/sec")
+    print(f"  Target:      {host}")
+    print(f"\n  SDG log:     {sdg_log_path}")
+    print(f"  APM log:     {apm_log_path}")
+    print("\n  Press Ctrl+C to stop both generators.\n")
+
+    sdg_log  = open(sdg_log_path,  "w")
+    apm_log  = open(apm_log_path,  "w")
+
+    sdg_proc = subprocess.Popen(
+        sdg_cmd,
+        stdout=sdg_log, stderr=subprocess.STDOUT,
+        cwd=script_dir,
+    )
+    apm_proc = subprocess.Popen(
+        apm_cmd,
+        stdout=apm_log, stderr=subprocess.STDOUT,
+        cwd=script_dir,
+    )
+
+    print(f"  ✓ SDG started         (PID {sdg_proc.pid})")
+    print(f"  ✓ APM trace generator (PID {apm_proc.pid})")
+    print()
+
+    def shutdown(signum=None, frame=None):
+        print("\n\nShutting down…")
+        for proc in (sdg_proc, apm_proc):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        for proc in (sdg_proc, apm_proc):
+            try:
+                proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        sdg_log.close()
+        apm_log.close()
+        print("Both generators stopped.")
+        print(f"\nFull logs saved to:\n  {sdg_log_path}\n  {apm_log_path}\n")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT,  shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    # ── Status loop ───────────────────────────────────────────────────────────
+    tick = 0
+    while True:
+        time.sleep(10)
+        tick += 1
+
+        # Check processes are still alive
+        sdg_alive = sdg_proc.poll() is None
+        apm_alive = apm_proc.poll() is None
+
+        print(f"[{tick * 10:>4}s]  SDG: {'running' if sdg_alive else 'STOPPED'}  |  "
+              f"APM: {'running' if apm_alive else 'STOPPED'}")
+
+        # Print last APM line so you can see trace counts
+        apm_lines = tail_log(apm_log_path, 2)
+        for line in apm_lines:
+            if "traces" in line.lower() or "error" in line.lower():
+                print(f"        APM: {line}")
+
+        # Restart a crashed process
+        if not sdg_alive:
+            print("  ⚠ SDG exited — restarting…")
+            sdg_log.close()
+            sdg_log = open(sdg_log_path, "a")
+            sdg_proc = subprocess.Popen(
+                sdg_cmd, stdout=sdg_log, stderr=subprocess.STDOUT, cwd=script_dir
+            )
+            print(f"  ✓ SDG restarted (PID {sdg_proc.pid})")
+
+        if not apm_alive:
+            print("  ⚠ APM trace generator exited — restarting…")
+            apm_log.close()
+            apm_log = open(apm_log_path, "a")
+            apm_proc = subprocess.Popen(
+                apm_cmd, stdout=apm_log, stderr=subprocess.STDOUT, cwd=script_dir
+            )
+            print(f"  ✓ APM trace generator restarted (PID {apm_proc.pid})")
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Run SDG and APM trace generator together for the LendPath workshop"
+    )
+    p.add_argument("--host",       default="https://localhost:9200")
+    p.add_argument("--user",       default="elastic")
+    p.add_argument("--password",   default="changeme")
+    p.add_argument("--no-verify-ssl", action="store_true")
+    p.add_argument("--sdg-config", default="mortgage-workshop.yml",
+                   help="SDG YAML config file (default: mortgage-workshop.yml)")
+    p.add_argument("--apm-rate",   type=float, default=2.0,
+                   help="APM traces per second (default: 2)")
+    args = p.parse_args()
+
+    run(
+        host       = args.host,
+        user       = args.user,
+        password   = args.password,
+        verify_ssl = not args.no_verify_ssl,
+        sdg_config = args.sdg_config,
+        apm_rate   = args.apm_rate,
+    )
+
+
+if __name__ == "__main__":
+    main()
