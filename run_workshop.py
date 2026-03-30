@@ -12,7 +12,8 @@ Usage:
         --user elastic --password changeme \\
         --no-verify-ssl \\
         [--sdg-config mortgage-workshop.yml] \\
-        [--apm-rate 2]
+        [--apm-rate 2] \\
+        [--purge-apm]     # wipe stale SDG traces before starting
 """
 
 import argparse
@@ -33,7 +34,7 @@ def tail_log(path, n=5):
         return []
 
 
-def run(host, user, password, verify_ssl, sdg_config, apm_rate):
+def run(host, user, password, verify_ssl, sdg_config, apm_rate, purge_apm=False):
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     sdg_script   = os.path.join(script_dir, "sdg-prime.py")
@@ -60,6 +61,8 @@ def run(host, user, password, verify_ssl, sdg_config, apm_rate):
     ]
     if not verify_ssl:
         apm_cmd.append("--no-verify-ssl")
+    if purge_apm:
+        apm_cmd.append("--purge")
 
     # ── Launch ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -67,6 +70,7 @@ def run(host, user, password, verify_ssl, sdg_config, apm_rate):
     print("=" * 60)
     print(f"\n  SDG config:  {sdg_config}")
     print(f"  APM rate:    {apm_rate} trace(s)/sec")
+    print(f"  Purge APM:   {'yes — stale traces will be deleted first' if purge_apm else 'no'}")
     print(f"  Target:      {host}")
     print(f"\n  SDG log:     {sdg_log_path}")
     print(f"  APM log:     {apm_log_path}")
@@ -162,6 +166,10 @@ def main():
                    help="SDG YAML config file (default: mortgage-workshop.yml)")
     p.add_argument("--apm-rate",   type=float, default=2.0,
                    help="APM traces per second (default: 2)")
+    p.add_argument("--purge-apm",  action="store_true",
+                   help="Delete traces-apm-mortgage before starting to clear "
+                        "stale SDG-generated unlinked traces. Use this on first "
+                        "run if the service map shows disconnected services.")
     args = p.parse_args()
 
     run(
@@ -171,6 +179,7 @@ def main():
         verify_ssl = not args.no_verify_ssl,
         sdg_config = args.sdg_config,
         apm_rate   = args.apm_rate,
+        purge_apm  = args.purge_apm,
     )
 
 
