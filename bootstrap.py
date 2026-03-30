@@ -1533,7 +1533,12 @@ def load_ml_jobs(host, auth, verify_ssl, job_files,
 
 
 def make_kibana_request(url, method, body, auth_header, verify_ssl=True):
-    """Like make_request but adds the kbn-xsrf header required by Kibana APIs."""
+    """Like make_request but adds the kbn-xsrf header required by Kibana APIs.
+
+    Returns (status, response_dict) on HTTP responses.
+    Returns (0, {"error": message}) on connection-level failures so callers
+    can handle them without catching exceptions.
+    """
     data = json.dumps(body).encode() if body else None
     req  = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type",  "application/json")
@@ -1551,6 +1556,24 @@ def make_kibana_request(url, method, body, auth_header, verify_ssl=True):
             return e.code, json.loads(e.read())
         except Exception:
             return e.code, {"error": str(e)}
+    except urllib.error.URLError as e:
+        # Connection-level failure (refused, DNS, timeout, SSL error)
+        return 0, {"error": str(e.reason)}
+    except OSError as e:
+        return 0, {"error": str(e)}
+
+
+def _kibana_is_reachable(kibana_host, auth, verify_ssl):
+    """Probe the Kibana status endpoint. Returns (True, version) or (False, reason)."""
+    status, resp = make_kibana_request(
+        f"{kibana_host}/api/status", "GET", None, auth, verify_ssl
+    )
+    if status == 0:
+        return False, resp.get("error", "connection refused")
+    if status in (200, 201):
+        version = (resp.get("version") or {}).get("number", "unknown")
+        return True, version
+    return False, f"HTTP {status}"
 
 
 def load_kibana_assets(kibana_host, auth, verify_ssl, vega_files):
@@ -1566,6 +1589,23 @@ def load_kibana_assets(kibana_host, auth, verify_ssl, vega_files):
     We use the single-object endpoint to keep dependencies minimal.
     """
     print("\n▸ Uploading Kibana assets…")
+
+    # ── Connectivity check ────────────────────────────────────────────────────
+    reachable, info = _kibana_is_reachable(kibana_host, auth, verify_ssl)
+    if not reachable:
+        print(f"  ⚠ Cannot reach Kibana at {kibana_host}")
+        print(f"      Reason: {info}")
+        print()
+        print("  Possible fixes:")
+        print(f"    • Is Kibana running? Check with: curl -u elastic:changeme {kibana_host}/api/status")
+        print(f"    • Wrong port? Try --kibana-host http://localhost:5601 (HTTP, not HTTPS)")
+        print(f"    • Cloud deployment? Use your full Kibana URL, e.g.")
+        print(f"      --kibana-host https://my-deployment.kb.us-east-1.aws.elastic-cloud.com")
+        print()
+        print("  Kibana Vega upload skipped. To retry later:")
+        print(f"    python bootstrap.py --skip-ml --kibana-host <correct-url> ...")
+        return
+    print(f"  ✓ Connected to Kibana {info}")
 
     for vega_path in vega_files:
         if not os.path.exists(vega_path):
