@@ -1531,17 +1531,130 @@ def load_ml_jobs(host, auth, verify_ssl, job_files,
 # ENTRY POINT
 # =============================================================================
 
+
+def make_kibana_request(url, method, body, auth_header, verify_ssl=True):
+    """Like make_request but adds the kbn-xsrf header required by Kibana APIs."""
+    data = json.dumps(body).encode() if body else None
+    req  = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type",  "application/json")
+    req.add_header("Authorization", auth_header)
+    req.add_header("kbn-xsrf",      "true")           # required by all Kibana write APIs
+    ctx = ssl.create_default_context()
+    if not verify_ssl:
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, context=ctx) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {"error": str(e)}
+
+
+def load_kibana_assets(kibana_host, auth, verify_ssl, vega_files):
+    """Upload Vega visualizations to Kibana via the Saved Objects API.
+
+    Each .vega.json file is posted as a visualization saved object.
+    Existing objects with the same title are updated (overwrite=true).
+
+    Kibana Saved Objects API:
+      POST /api/saved_objects/visualization
+      POST /api/saved_objects/_import   (bulk, used for ndjson)
+
+    We use the single-object endpoint to keep dependencies minimal.
+    """
+    print("\n▸ Uploading Kibana assets…")
+
+    for vega_path in vega_files:
+        if not os.path.exists(vega_path):
+            print(f"  ⚠ Vega file not found, skipping: {vega_path}")
+            continue
+
+        with open(vega_path) as fh:
+            try:
+                spec = json.load(fh)
+            except json.JSONDecodeError as e:
+                print(f"  ✗ Invalid JSON in {vega_path}: {e}")
+                continue
+
+        # Derive a title from the description field or filename
+        title = spec.get("description", os.path.splitext(os.path.basename(vega_path))[0])
+
+        # visState is a JSON-encoded string containing the Vega spec
+        vis_state = json.dumps({
+            "title":  title,
+            "type":   "vega",
+            "aggs":   [],
+            "params": {
+                "spec": json.dumps(spec, separators=(",", ":"))
+            },
+        })
+
+        body = {
+            "attributes": {
+                "title":        title,
+                "visState":     vis_state,
+                "uiStateJSON":  "{}",
+                "description":  title,
+                "version":      1,
+                "kibanaSavedObjectMeta": {
+                    "searchSourceJSON": json.dumps({"query": {"query": "", "language": "kuery"}, "filter": []})
+                },
+            }
+        }
+
+        # Try to create; if 409 conflict (already exists) update instead
+        url    = f"{kibana_host}/api/saved_objects/visualization"
+        status, resp = make_kibana_request(url, "POST", body, auth, verify_ssl)
+
+        if status in (200, 201):
+            obj_id = resp.get("id", "?")
+            print(f"  ✓ [{status}] Vega viz created: {title} (id: {obj_id})")
+        elif status == 409:
+            # Already exists — update it
+            obj_id = resp.get("id") or (resp.get("error", {}) or {}).get("meta", {}).get("id", "")
+            if not obj_id:
+                # Extract from error message if possible
+                err_str = json.dumps(resp)
+                import re
+                m = re.search(r'"id"\s*:\s*"([^"]+)"', err_str)
+                obj_id = m.group(1) if m else None
+
+            if obj_id:
+                put_url = f"{kibana_host}/api/saved_objects/visualization/{obj_id}"
+                put_body = {"attributes": body["attributes"]}
+                s2, r2 = make_kibana_request(put_url, "PUT", put_body, auth, verify_ssl)
+                if s2 in (200, 201):
+                    print(f"  ~ [updated] Vega viz: {title} (id: {obj_id})")
+                else:
+                    print(f"  ✗ [{s2}] Could not update Vega viz: {title}")
+                    print(f"      {r2}")
+            else:
+                print(f"  ~ [exists] Vega viz: {title} (could not retrieve id to update)")
+        else:
+            print(f"  ✗ [{status}] Failed to upload Vega viz: {title}")
+            print(f"      {resp}")
+            if status in (401, 403):
+                print("      Check that --kibana-host is correct and credentials have Kibana write access.")
+            elif status == 404:
+                print("      Kibana may not be running, or the host/port is wrong.")
+                print(f"      Tried: {url}")
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Bootstrap the LendPath ML Workshop — templates + ML jobs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Step 1 — Run once before starting the SDG (templates + AD jobs):
-  python bootstrap.py --host https://localhost:9200 --user elastic --password changeme --no-verify-ssl
+  # Step 1 — Run once before starting the SDG (templates + AD jobs + Vega viz):
+  python bootstrap.py --host https://localhost:9200 --kibana-host https://localhost:5601 \
+      --user elastic --password changeme --no-verify-ssl
 
   # Step 2 — Start the data generator:
-  python sdg-prime.py mortgage-workshop.yml
+  python run_workshop.py --host https://localhost:9200 --user elastic --password changeme --no-verify-ssl
 
   # Step 3 — After 30-60 min of data, create DFA jobs:
   python bootstrap.py ... --create-dfa
@@ -1552,11 +1665,12 @@ Examples:
   # Start AD datafeeds immediately (if SDG is already running):
   python bootstrap.py ... --start-datafeeds
 
-  # Templates only, no ML jobs at all:
-  python bootstrap.py ... --skip-ml
+  # Templates only, no ML jobs at all, no Kibana:
+  python bootstrap.py ... --skip-ml --skip-kibana
 
-  # Use custom job files:
+  # Use custom job files or Vega spec:
   python bootstrap.py ... --job-files my-jobs.json extra-jobs.json
+  python bootstrap.py ... --vega-file my-topology.vega.json
         """,
     )
     p.add_argument("--host",     default="https://localhost:9200",
@@ -1584,6 +1698,15 @@ Examples:
                    help="ML job definition JSON files to load "
                         "(default: ml-job-definitions.json "
                         "ml-job-definitions-integrations.json)")
+    p.add_argument("--kibana-host", default="https://localhost:5601",
+                   help="Kibana base URL (default: https://localhost:5601)")
+    p.add_argument("--skip-kibana", action="store_true",
+                   help="Skip Kibana asset upload (Vega visualizations)")
+    p.add_argument("--vega-file", nargs="+",
+                   default=["lendpath-topology.vega.json"],
+                   metavar="FILE",
+                   help="Vega spec files to upload to Kibana "
+                        "(default: lendpath-topology.vega.json)")
     args = p.parse_args()
 
     verify_ssl = not args.no_verify_ssl
@@ -1598,7 +1721,16 @@ Examples:
     # 1. Index templates (always runs)
     setup(args.host, args.user, args.password, verify_ssl)
 
-    # 2. ML job creation
+    # 2. Kibana assets (Vega visualizations)
+    if args.skip_kibana:
+        print("\n  (--skip-kibana: Kibana asset upload skipped)")
+    else:
+        load_kibana_assets(
+            args.kibana_host, auth, verify_ssl,
+            args.vega_file,
+        )
+
+    # 3. ML job creation
     if args.skip_ml:
         print("\n  (--skip-ml: all ML job creation skipped)")
 
@@ -1620,7 +1752,7 @@ Examples:
             start_datafeeds=args.start_datafeeds,
         )
 
-    # 3. Summary
+    # 4. Summary
     print("\n" + "=" * 56)
     print("✓ Bootstrap complete.")
     print()
@@ -1649,12 +1781,17 @@ Examples:
         print("    python bootstrap.py --create-dfa --no-verify-ssl")
         print("      --host ... --user ... --password ...")
     print()
+    if not args.skip_kibana:
+        print("  Kibana:")
+        print("    Dashboards → LendPath Service Network Topology (Vega viz)")
+        print()
     print("Workflow:")
-    print("  1. python sdg-prime.py mortgage-workshop.yml")
-    print("  2. Wait 30–60 minutes for data to accumulate")
-    print("  3. Start AD datafeeds (Kibana or --start-datafeeds)")
-    print("  4. python bootstrap.py --create-dfa [--run-dfa] ...")
-    print("  5. Follow WORKSHOP_GUIDE.md")
+    print("  1. python bootstrap.py ...             (this script — run first)")
+    print("  2. python run_workshop.py ...          (starts SDG + APM generator)")
+    print("  3. Wait 30–60 minutes for data")
+    print("  4. Start AD datafeeds in Kibana: ML → Anomaly Detection → Jobs → ▶")
+    print("  5. python bootstrap.py --create-dfa ... (after data is populated)")
+    print("  6. Follow WORKSHOP_GUIDE.md")
     print()
 
 
