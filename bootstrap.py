@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-bootstrap.py — Creates index templates and component templates for the
-LendPath Mortgage ML Workshop data streams.
+bootstrap.py — Full bootstrap for the LendPath Mortgage ML Workshop.
+
+Creates index templates, ML anomaly detection jobs + datafeeds, and
+Data Frame Analytics jobs so the environment is completely ready before
+the SDG starts generating data.
 
 Covers all 21 data streams:
   Core LendPath (8):  nginx access/error/stubstatus, LOS applications,
@@ -10,17 +13,29 @@ Covers all 21 data streams:
                       HAProxy log/stat/info, Kafka broker/partition,
                       Oracle database_audit/sysmetric/tablespace, PingOne audit
 
-Run this BEFORE starting sdg-prime.py to ensure data streams are
-properly configured with correct mappings.
+ML jobs loaded from:
+  ml-job-definitions.json              Core jobs  (Modules 1–14)
+  ml-job-definitions-integrations.json Integration jobs (Modules 15–21)
 
 Usage:
+    # Full bootstrap (templates + ML jobs):
     python bootstrap.py --host https://localhost:9200 \
                         --user elastic --password changeme \
-                        [--no-verify-ssl]
+                        --no-verify-ssl
+
+    # Templates only (skip ML job creation):
+    python bootstrap.py ... --skip-ml
+
+    # Templates + ML jobs + start all datafeeds immediately:
+    python bootstrap.py ... --start-datafeeds
+
+    # Use alternate job definition files:
+    python bootstrap.py ... --job-files jobs1.json jobs2.json
 """
 
 import argparse
 import json
+import os
 import sys
 import urllib.request
 import urllib.error
@@ -143,8 +158,6 @@ def setup(host, user, password, verify_ssl):
     creds = base64.b64encode(f"{user}:{password}".encode()).decode()
     auth  = f"Basic {creds}"
 
-    print("\n=== LendPath Mortgage ML Workshop — Bootstrap ===")
-    print(f"    Target: {host}\n")
 
     # =========================================================================
     # COMPONENT TEMPLATES
@@ -507,25 +520,66 @@ def setup(host, user, password, verify_ssl):
     }, auth, verify_ssl)
 
     # ── APM spans / traces ────────────────────────────────────────────────────
-    put(host, "/_index_template/traces-mortgage.spans", {
-        "index_patterns": ["traces-mortgage.spans-*"],
+    # ── APM transactions + spans  (traces-apm-mortgage) ─────────────────────────
+    # Matches the traces-apm* index pattern that Kibana APM UI queries.
+    # Includes all fields required by the APM UI:
+    #   processor.event/name  — classifies document type (transaction vs span)
+    #   service.language.*    — used for agent icon and language filter
+    #   service.node.name     — instance identity in the service map
+    #   transaction.result    — HTTP 2xx / 4xx / 5xx in the transactions table
+    #   transaction.sampled   — required for trace waterfall rendering
+    #   destination.service.* — drives edges in the APM service map
+    #   parent.id             — links spans to their parent transaction/span
+    put(host, "/_index_template/traces-apm-mortgage", {
+        "index_patterns": ["traces-apm-mortgage*"],
         "data_stream": {}, "priority": 300,
         "composed_of": ["mortgage-common@mappings"],
         "template": {
-            "settings": {"index": {"lifecycle": {"name": "logs"}}},
+            "settings": {"index": {"lifecycle": {"name": "traces"}}},
             "mappings": {
                 "properties": {
-                    "service": _service_block(),
-                    "client":  _client_with_geo(),
-                    "source":  _source_with_geo(),
-                    "user":    _user_block(),
-                    "http":    _http_block(),
+                    "service": {
+                        "properties": {
+                            "name":        {"type": "keyword"},
+                            "version":     {"type": "keyword"},
+                            "environment": {"type": "keyword"},
+                            "node":        {"properties": {"name": {"type": "keyword"}}},
+                            "language": {
+                                "properties": {
+                                    "name":    {"type": "keyword"},
+                                    "version": {"type": "keyword"},
+                                }
+                            },
+                            "runtime": {
+                                "properties": {
+                                    "name":    {"type": "keyword"},
+                                    "version": {"type": "keyword"},
+                                }
+                            },
+                            "framework": {
+                                "properties": {
+                                    "name":    {"type": "keyword"},
+                                    "version": {"type": "keyword"},
+                                }
+                            },
+                        }
+                    },
+                    # processor fields — the single most important APM UI requirement
+                    "processor": {
+                        "properties": {
+                            "event": {"type": "keyword"},
+                            "name":  {"type": "keyword"},
+                        }
+                    },
                     "trace":       {"properties": {"id": {"type": "keyword"}}},
+                    "parent":      {"properties": {"id": {"type": "keyword"}}},
                     "transaction": {
                         "properties": {
                             "id":       {"type": "keyword"},
                             "name":     {"type": "keyword"},
                             "type":     {"type": "keyword"},
+                            "result":   {"type": "keyword"},
+                            "sampled":  {"type": "boolean"},
                             "duration": {"properties": {"us": {"type": "long"}}},
                         }
                     },
@@ -534,7 +588,31 @@ def setup(host, user, password, verify_ssl):
                             "id":       {"type": "keyword"},
                             "name":     {"type": "keyword"},
                             "type":     {"type": "keyword"},
+                            "subtype":  {"type": "keyword"},
+                            "action":   {"type": "keyword"},
                             "duration": {"properties": {"us": {"type": "long"}}},
+                        }
+                    },
+                    # destination.service — drives APM service map topology edges
+                    "destination": {
+                        "properties": {
+                            "service": {
+                                "properties": {
+                                    "name":     {"type": "keyword"},
+                                    "resource": {"type": "keyword"},
+                                    "type":     {"type": "keyword"},
+                                }
+                            }
+                        }
+                    },
+                    "client":  _client_with_geo(),
+                    "user":    _user_block(),
+                    "http":    _http_block(),
+                    "url": {
+                        "properties": {
+                            "full":   {"type": "keyword"},
+                            "path":   {"type": "keyword"},
+                            "domain": {"type": "keyword"},
                         }
                     },
                     "labels": {
@@ -1288,23 +1366,239 @@ def setup(host, user, password, verify_ssl):
     }, auth, verify_ssl)
 
     # =========================================================================
-    print("\n✓ Bootstrap complete — all 21 data stream templates created.")
-    print("\nNext steps:")
-    print("  1. python sdg-prime.py mortgage-workshop.yml")
-    print("  2. Let data accumulate for 30–60 minutes")
-    print("  3. Follow WORKSHOP_GUIDE.md\n")
+    print("\n✓ Index templates complete — all 21 data stream templates created.")
 
+
+# =============================================================================
+# ML JOB LOADING
+# =============================================================================
+
+def _load_job_files(job_files):
+    """Load and merge job definitions from one or more JSON files."""
+    anomaly_jobs, dfa_jobs = [], []
+    for path in job_files:
+        if not os.path.exists(path):
+            print(f"  ⚠ Job file not found, skipping: {path}")
+            continue
+        with open(path) as fh:
+            data = json.load(fh)
+        anomaly_jobs.extend(data.get("anomaly_detection_jobs", []))
+        dfa_jobs.extend(data.get("data_frame_analytics_jobs", []))
+        print(f"  ✓ Loaded {path}")
+    return anomaly_jobs, dfa_jobs
+
+
+def _put_ml_job(host, path, body, auth, verify_ssl, label):
+    """PUT an ML resource.
+
+    Success: 200 / 201  → ✓
+    Already exists:
+      - AD jobs return 400 resource_already_exists_exception
+      - Datafeeds return 409 status_exception with 'already exists'
+      Both are treated as soft warnings → ~
+    Any other error → ✗
+    """
+    status, resp = make_request(f"{host}{path}", "PUT", body, auth, verify_ssl)
+    if status in (200, 201):
+        print(f"  ✓ [{status}] {label}")
+        return True
+    # Both 400 (AD jobs) and 409 (datafeeds) can mean "already exists"
+    if status in (400, 409):
+        resp_text = json.dumps(resp).lower()
+        if "already exists" in resp_text or "already used" in resp_text:
+            print(f"  ~ [exists] {label}")
+            return True
+    print(f"  ✗ [{status}] {label}")
+    print(f"      {resp}")
+    return False
+
+
+def _post_ml(host, path, body, auth, verify_ssl, label):
+    """POST to an ML endpoint (e.g. open job, start datafeed)."""
+    status, resp = make_request(f"{host}{path}", "POST", body, auth, verify_ssl)
+    ok = status in (200, 201)
+    print(f"  {'✓' if ok else '✗'} [{status}] {label}")
+    if not ok:
+        print(f"      {resp}")
+    return ok
+
+
+def load_ml_jobs(host, auth, verify_ssl, job_files, start_datafeeds=False):
+    """Create all anomaly detection jobs, datafeeds, and DFA jobs."""
+
+    print("\n▸ Loading ML job definition files…")
+    anomaly_jobs, dfa_jobs = _load_job_files(job_files)
+
+    if not anomaly_jobs and not dfa_jobs:
+        print("  ⚠ No ML jobs found. Check that job definition files are present.")
+        return
+
+    # ── Anomaly detection jobs ────────────────────────────────────────────────
+    if anomaly_jobs:
+        print(f"\n▸ Creating {len(anomaly_jobs)} anomaly detection jobs…")
+        datafeeds_to_start = []
+
+        for job in anomaly_jobs:
+            # Strip comment and internal-only keys before sending to ES
+            job_body = {k: v for k, v in job.items()
+                        if not k.startswith("_")}
+
+            # Extract datafeed config before creating the job
+            datafeed_cfg = job_body.pop("datafeed_config", None)
+
+            job_id = job_body.get("job_id", "unknown")
+
+            # Create the anomaly detection job
+            _put_ml_job(
+                host, f"/_ml/anomaly_detectors/{job_id}",
+                job_body, auth, verify_ssl,
+                f"AD job: {job_id}"
+            )
+
+            # Create the datafeed if config was provided
+            if datafeed_cfg:
+                datafeed_id = datafeed_cfg.get(
+                    "datafeed_id", f"datafeed-{job_id}"
+                )
+                # Datafeed must reference its job
+                datafeed_cfg["job_id"] = job_id
+
+                _put_ml_job(
+                    host, f"/_ml/datafeeds/{datafeed_id}",
+                    datafeed_cfg, auth, verify_ssl,
+                    f"Datafeed: {datafeed_id}"
+                )
+                datafeeds_to_start.append((job_id, datafeed_id))
+
+        # ── Optionally open jobs and start datafeeds ──────────────────────────
+        if start_datafeeds and datafeeds_to_start:
+            print(f"\n▸ Opening jobs and starting {len(datafeeds_to_start)} datafeeds…")
+            for job_id, datafeed_id in datafeeds_to_start:
+                _post_ml(
+                    host, f"/_ml/anomaly_detectors/{job_id}/_open",
+                    {}, auth, verify_ssl,
+                    f"Open job: {job_id}"
+                )
+                _post_ml(
+                    host, f"/_ml/datafeeds/{datafeed_id}/_start",
+                    {}, auth, verify_ssl,
+                    f"Start datafeed: {datafeed_id}"
+                )
+
+    # ── Data Frame Analytics jobs ─────────────────────────────────────────────
+    if dfa_jobs:
+        print(f"\n▸ Creating {len(dfa_jobs)} Data Frame Analytics jobs…")
+        for job in dfa_jobs:
+            job_body = {k: v for k, v in job.items()
+                        if not k.startswith("_")}
+            job_id = job_body.get("id", "unknown")
+            _put_ml_job(
+                host, f"/_ml/data_frame/analytics/{job_id}",
+                job_body, auth, verify_ssl,
+                f"DFA job: {job_id}"
+            )
+
+        if start_datafeeds:
+            # "start" for DFA means starting the analysis run
+            print(f"\n▸ Starting {len(dfa_jobs)} DFA jobs…")
+            for job in dfa_jobs:
+                job_id = {k: v for k, v in job.items()
+                          if not k.startswith("_")}.get("id", "unknown")
+                _post_ml(
+                    host, f"/_ml/data_frame/analytics/{job_id}/_start",
+                    {}, auth, verify_ssl,
+                    f"Start DFA: {job_id}"
+                )
+
+
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
 
 def main():
     p = argparse.ArgumentParser(
-        description="Bootstrap index templates for LendPath ML Workshop (21 data streams)"
+        description="Bootstrap the LendPath ML Workshop — templates + ML jobs",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Full bootstrap (recommended):
+  python bootstrap.py --host https://localhost:9200 --user elastic --password changeme --no-verify-ssl
+
+  # Templates only, skip ML jobs:
+  python bootstrap.py ... --skip-ml
+
+  # Templates + jobs + start all datafeeds immediately:
+  python bootstrap.py ... --start-datafeeds
+
+  # Use custom job files:
+  python bootstrap.py ... --job-files my-jobs.json extra-jobs.json
+        """,
     )
-    p.add_argument("--host",     default="https://localhost:9200", help="Elasticsearch base URL")
+    p.add_argument("--host",     default="https://localhost:9200",
+                   help="Elasticsearch base URL (default: https://localhost:9200)")
     p.add_argument("--user",     default="elastic")
     p.add_argument("--password", default="changeme")
-    p.add_argument("--no-verify-ssl", action="store_true")
+    p.add_argument("--no-verify-ssl", action="store_true",
+                   help="Disable SSL certificate verification")
+    p.add_argument("--skip-ml", action="store_true",
+                   help="Create index templates only; skip ML job creation")
+    p.add_argument("--start-datafeeds", action="store_true",
+                   help="Open AD jobs and start datafeeds after creating them "
+                        "(only useful if the SDG is already running)")
+    p.add_argument("--job-files", nargs="+",
+                   default=["ml-job-definitions.json",
+                            "ml-job-definitions-integrations.json"],
+                   metavar="FILE",
+                   help="ML job definition JSON files to load "
+                        "(default: ml-job-definitions.json "
+                        "ml-job-definitions-integrations.json)")
     args = p.parse_args()
-    setup(args.host, args.user, args.password, not args.no_verify_ssl)
+
+    verify_ssl = not args.no_verify_ssl
+    creds = base64.b64encode(
+        f"{args.user}:{args.password}".encode()
+    ).decode()
+    auth = f"Basic {creds}"
+
+    print("\n=== LendPath Mortgage ML Workshop — Bootstrap ===")
+    print(f"    Target: {args.host}\n")
+
+    # 1. Index templates (always)
+    setup(args.host, args.user, args.password, verify_ssl)
+
+    # 2. ML jobs (unless --skip-ml)
+    if args.skip_ml:
+        print("\n  (--skip-ml set — ML job creation skipped)")
+    else:
+        load_ml_jobs(
+            args.host, auth, verify_ssl,
+            args.job_files,
+            start_datafeeds=args.start_datafeeds,
+        )
+
+    # 3. Summary
+    print("\n" + "=" * 56)
+    print("✓ Bootstrap complete.")
+    print()
+    if args.skip_ml:
+        print("  ML jobs were NOT created (--skip-ml).")
+        print("  Re-run without --skip-ml to create them.")
+    elif args.start_datafeeds:
+        print("  Datafeeds are running. Monitor in Kibana:")
+        print("  Machine Learning → Anomaly Detection → Jobs")
+    else:
+        print("  ML jobs created but datafeeds are NOT yet started.")
+        print("  Start the SDG first, then open jobs in Kibana:")
+        print("  Machine Learning → Anomaly Detection → Jobs → ▶")
+        print()
+        print("  Or re-run with --start-datafeeds once data is flowing.")
+    print()
+    print("Next steps:")
+    print("  1. python sdg-prime.py mortgage-workshop.yml")
+    print("  2. Let data accumulate for 30–60 minutes")
+    print("  3. Start datafeeds in Kibana (or re-run with --start-datafeeds)")
+    print("  4. Follow WORKSHOP_GUIDE.md")
+    print()
 
 
 if __name__ == "__main__":
