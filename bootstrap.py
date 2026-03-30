@@ -23,10 +23,19 @@ Usage:
                         --user elastic --password changeme \
                         --no-verify-ssl
 
-    # Templates only (skip ML job creation):
+    # Templates only (skip all ML job creation):
     python bootstrap.py ... --skip-ml
 
-    # Templates + ML jobs + start all datafeeds immediately:
+    # Templates + AD jobs only (default — safe before SDG has run):
+    python bootstrap.py ...
+
+    # Create DFA jobs (run AFTER SDG has populated source indices):
+    python bootstrap.py ... --create-dfa
+
+    # Create DFA jobs AND immediately start them:
+    python bootstrap.py ... --create-dfa --run-dfa
+
+    # Templates + AD jobs + start all datafeeds immediately:
     python bootstrap.py ... --start-datafeeds
 
     # Use alternate job definition files:
@@ -1423,92 +1432,99 @@ def _post_ml(host, path, body, auth, verify_ssl, label):
     return ok
 
 
-def load_ml_jobs(host, auth, verify_ssl, job_files, start_datafeeds=False):
-    """Create all anomaly detection jobs, datafeeds, and DFA jobs."""
+def load_anomaly_jobs(host, auth, verify_ssl, job_files, start_datafeeds=False):
+    """Create anomaly detection jobs and datafeeds.
 
+    Safe to run before any data exists — AD jobs do not validate that
+    source indices are populated at creation time.
+    """
     print("\n▸ Loading ML job definition files…")
-    anomaly_jobs, dfa_jobs = _load_job_files(job_files)
+    anomaly_jobs, _ = _load_job_files(job_files)
 
-    if not anomaly_jobs and not dfa_jobs:
-        print("  ⚠ No ML jobs found. Check that job definition files are present.")
+    if not anomaly_jobs:
+        print("  ⚠ No anomaly detection jobs found.")
         return
 
-    # ── Anomaly detection jobs ────────────────────────────────────────────────
-    if anomaly_jobs:
-        print(f"\n▸ Creating {len(anomaly_jobs)} anomaly detection jobs…")
-        datafeeds_to_start = []
+    print(f"\n▸ Creating {len(anomaly_jobs)} anomaly detection jobs…")
+    datafeeds_to_start = []
 
-        for job in anomaly_jobs:
-            # Strip comment and internal-only keys before sending to ES
-            job_body = {k: v for k, v in job.items()
-                        if not k.startswith("_")}
+    for job in anomaly_jobs:
+        job_body = {k: v for k, v in job.items() if not k.startswith("_")}
+        datafeed_cfg = job_body.pop("datafeed_config", None)
+        job_id = job_body.get("job_id", "unknown")
 
-            # Extract datafeed config before creating the job
-            datafeed_cfg = job_body.pop("datafeed_config", None)
+        _put_ml_job(
+            host, f"/_ml/anomaly_detectors/{job_id}",
+            job_body, auth, verify_ssl,
+            f"AD job: {job_id}"
+        )
 
-            job_id = job_body.get("job_id", "unknown")
-
-            # Create the anomaly detection job
+        if datafeed_cfg:
+            datafeed_id = datafeed_cfg.get("datafeed_id", f"datafeed-{job_id}")
+            datafeed_cfg["job_id"] = job_id
             _put_ml_job(
-                host, f"/_ml/anomaly_detectors/{job_id}",
-                job_body, auth, verify_ssl,
-                f"AD job: {job_id}"
+                host, f"/_ml/datafeeds/{datafeed_id}",
+                datafeed_cfg, auth, verify_ssl,
+                f"Datafeed: {datafeed_id}"
             )
+            datafeeds_to_start.append((job_id, datafeed_id))
 
-            # Create the datafeed if config was provided
-            if datafeed_cfg:
-                datafeed_id = datafeed_cfg.get(
-                    "datafeed_id", f"datafeed-{job_id}"
-                )
-                # Datafeed must reference its job
-                datafeed_cfg["job_id"] = job_id
+    if start_datafeeds and datafeeds_to_start:
+        print(f"\n▸ Opening jobs and starting {len(datafeeds_to_start)} datafeeds…")
+        for job_id, datafeed_id in datafeeds_to_start:
+            _post_ml(host, f"/_ml/anomaly_detectors/{job_id}/_open",
+                     {}, auth, verify_ssl, f"Open job: {job_id}")
+            _post_ml(host, f"/_ml/datafeeds/{datafeed_id}/_start",
+                     {}, auth, verify_ssl, f"Start datafeed: {datafeed_id}")
 
-                _put_ml_job(
-                    host, f"/_ml/datafeeds/{datafeed_id}",
-                    datafeed_cfg, auth, verify_ssl,
-                    f"Datafeed: {datafeed_id}"
-                )
-                datafeeds_to_start.append((job_id, datafeed_id))
 
-        # ── Optionally open jobs and start datafeeds ──────────────────────────
-        if start_datafeeds and datafeeds_to_start:
-            print(f"\n▸ Opening jobs and starting {len(datafeeds_to_start)} datafeeds…")
-            for job_id, datafeed_id in datafeeds_to_start:
-                _post_ml(
-                    host, f"/_ml/anomaly_detectors/{job_id}/_open",
-                    {}, auth, verify_ssl,
-                    f"Open job: {job_id}"
-                )
-                _post_ml(
-                    host, f"/_ml/datafeeds/{datafeed_id}/_start",
-                    {}, auth, verify_ssl,
-                    f"Start datafeed: {datafeed_id}"
-                )
+def load_dfa_jobs(host, auth, verify_ssl, job_files, run_dfa=False):
+    """Create Data Frame Analytics jobs.
 
-    # ── Data Frame Analytics jobs ─────────────────────────────────────────────
-    if dfa_jobs:
-        print(f"\n▸ Creating {len(dfa_jobs)} Data Frame Analytics jobs…")
-        for job in dfa_jobs:
-            job_body = {k: v for k, v in job.items()
-                        if not k.startswith("_")}
-            job_id = job_body.get("id", "unknown")
-            _put_ml_job(
-                host, f"/_ml/data_frame/analytics/{job_id}",
-                job_body, auth, verify_ssl,
-                f"DFA job: {job_id}"
-            )
+    IMPORTANT: DFA jobs validate that source indices exist and contain data
+    at creation time. Only run this after the SDG has been running long
+    enough to populate all source indices (typically 30–60 minutes).
 
-        if start_datafeeds:
-            # "start" for DFA means starting the analysis run
-            print(f"\n▸ Starting {len(dfa_jobs)} DFA jobs…")
-            for job in dfa_jobs:
-                job_id = {k: v for k, v in job.items()
-                          if not k.startswith("_")}.get("id", "unknown")
-                _post_ml(
-                    host, f"/_ml/data_frame/analytics/{job_id}/_start",
-                    {}, auth, verify_ssl,
-                    f"Start DFA: {job_id}"
-                )
+    Required minimum documents per source index:
+      Outlier Detection:  1,000+
+      Regression:         1,000+
+      Classification:     5,000+  (recommended for a useful model)
+    """
+    _, dfa_jobs = _load_job_files(job_files)
+
+    if not dfa_jobs:
+        print("  ⚠ No DFA jobs found.")
+        return
+
+    print(f"\n▸ Creating {len(dfa_jobs)} Data Frame Analytics jobs…")
+    print("  (source indices must already contain data)")
+
+    created = []
+    for job in dfa_jobs:
+        job_body = {k: v for k, v in job.items() if not k.startswith("_")}
+        job_id = job_body.get("id", "unknown")
+        ok = _put_ml_job(
+            host, f"/_ml/data_frame/analytics/{job_id}",
+            job_body, auth, verify_ssl,
+            f"DFA job: {job_id}"
+        )
+        if ok:
+            created.append(job_id)
+
+    if run_dfa and created:
+        print(f"\n▸ Starting {len(created)} DFA jobs…")
+        for job_id in created:
+            _post_ml(host, f"/_ml/data_frame/analytics/{job_id}/_start",
+                     {}, auth, verify_ssl, f"Start DFA: {job_id}")
+
+
+# kept for backwards compatibility — calls both functions
+def load_ml_jobs(host, auth, verify_ssl, job_files,
+                 start_datafeeds=False, skip_dfa=True,
+                 run_dfa=False):
+    load_anomaly_jobs(host, auth, verify_ssl, job_files, start_datafeeds)
+    if not skip_dfa:
+        load_dfa_jobs(host, auth, verify_ssl, job_files, run_dfa)
 
 
 # =============================================================================
@@ -1521,14 +1537,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Full bootstrap (recommended):
+  # Step 1 — Run once before starting the SDG (templates + AD jobs):
   python bootstrap.py --host https://localhost:9200 --user elastic --password changeme --no-verify-ssl
 
-  # Templates only, skip ML jobs:
-  python bootstrap.py ... --skip-ml
+  # Step 2 — Start the data generator:
+  python sdg-prime.py mortgage-workshop.yml
 
-  # Templates + jobs + start all datafeeds immediately:
+  # Step 3 — After 30-60 min of data, create DFA jobs:
+  python bootstrap.py ... --create-dfa
+
+  # Step 3 (alternative) — Create AND immediately start DFA jobs:
+  python bootstrap.py ... --create-dfa --run-dfa
+
+  # Start AD datafeeds immediately (if SDG is already running):
   python bootstrap.py ... --start-datafeeds
+
+  # Templates only, no ML jobs at all:
+  python bootstrap.py ... --skip-ml
 
   # Use custom job files:
   python bootstrap.py ... --job-files my-jobs.json extra-jobs.json
@@ -1541,10 +1566,17 @@ Examples:
     p.add_argument("--no-verify-ssl", action="store_true",
                    help="Disable SSL certificate verification")
     p.add_argument("--skip-ml", action="store_true",
-                   help="Create index templates only; skip ML job creation")
+                   help="Create index templates only; skip all ML job creation")
     p.add_argument("--start-datafeeds", action="store_true",
                    help="Open AD jobs and start datafeeds after creating them "
                         "(only useful if the SDG is already running)")
+    p.add_argument("--create-dfa", action="store_true",
+                   help="Create Data Frame Analytics jobs. Run this AFTER the "
+                        "SDG has populated source indices (30-60 min of data). "
+                        "DFA jobs fail at creation if source indices are empty.")
+    p.add_argument("--run-dfa", action="store_true",
+                   help="Immediately start DFA jobs after creating them "
+                        "(only meaningful combined with --create-dfa)")
     p.add_argument("--job-files", nargs="+",
                    default=["ml-job-definitions.json",
                             "ml-job-definitions-integrations.json"],
@@ -1563,14 +1595,26 @@ Examples:
     print("\n=== LendPath Mortgage ML Workshop — Bootstrap ===")
     print(f"    Target: {args.host}\n")
 
-    # 1. Index templates (always)
+    # 1. Index templates (always runs)
     setup(args.host, args.user, args.password, verify_ssl)
 
-    # 2. ML jobs (unless --skip-ml)
+    # 2. ML job creation
     if args.skip_ml:
-        print("\n  (--skip-ml set — ML job creation skipped)")
+        print("\n  (--skip-ml: all ML job creation skipped)")
+
+    elif args.create_dfa:
+        # DFA-only mode — create (and optionally start) DFA jobs
+        print("\n▸ Loading ML job definition files…")
+        _, _ = _load_job_files(args.job_files)   # prints load summary
+        load_dfa_jobs(
+            args.host, auth, verify_ssl,
+            args.job_files,
+            run_dfa=args.run_dfa,
+        )
+
     else:
-        load_ml_jobs(
+        # Default — create AD jobs + datafeeds only (safe before SDG runs)
+        load_anomaly_jobs(
             args.host, auth, verify_ssl,
             args.job_files,
             start_datafeeds=args.start_datafeeds,
@@ -1580,24 +1624,37 @@ Examples:
     print("\n" + "=" * 56)
     print("✓ Bootstrap complete.")
     print()
+
     if args.skip_ml:
-        print("  ML jobs were NOT created (--skip-ml).")
-        print("  Re-run without --skip-ml to create them.")
+        print("  No ML jobs created.")
+        print("  Re-run without --skip-ml to create AD jobs.")
+    elif args.create_dfa:
+        if args.run_dfa:
+            print("  DFA jobs created and started.")
+            print("  Monitor progress: ML → Data Frame Analytics")
+        else:
+            print("  DFA jobs created but NOT yet started.")
+            print("  Start them in Kibana: ML → Data Frame Analytics → ▶")
+            print("  Or re-run with --create-dfa --run-dfa")
     elif args.start_datafeeds:
-        print("  Datafeeds are running. Monitor in Kibana:")
-        print("  Machine Learning → Anomaly Detection → Jobs")
+        print("  AD jobs and datafeeds created and started.")
+        print("  Monitor: ML → Anomaly Detection → Jobs")
     else:
-        print("  ML jobs created but datafeeds are NOT yet started.")
-        print("  Start the SDG first, then open jobs in Kibana:")
-        print("  Machine Learning → Anomaly Detection → Jobs → ▶")
+        print("  AD jobs + datafeeds created. Datafeeds NOT yet started.")
+        print("  Start the SDG, then either:")
+        print("    a) Open jobs in Kibana: ML → Anomaly Detection → Jobs → ▶")
+        print("    b) Re-run with --start-datafeeds")
         print()
-        print("  Or re-run with --start-datafeeds once data is flowing.")
+        print("  Once 30–60 min of data has accumulated, create DFA jobs:")
+        print("    python bootstrap.py --create-dfa --no-verify-ssl")
+        print("      --host ... --user ... --password ...")
     print()
-    print("Next steps:")
+    print("Workflow:")
     print("  1. python sdg-prime.py mortgage-workshop.yml")
-    print("  2. Let data accumulate for 30–60 minutes")
-    print("  3. Start datafeeds in Kibana (or re-run with --start-datafeeds)")
-    print("  4. Follow WORKSHOP_GUIDE.md")
+    print("  2. Wait 30–60 minutes for data to accumulate")
+    print("  3. Start AD datafeeds (Kibana or --start-datafeeds)")
+    print("  4. python bootstrap.py --create-dfa [--run-dfa] ...")
+    print("  5. Follow WORKSHOP_GUIDE.md")
     print()
 
 
