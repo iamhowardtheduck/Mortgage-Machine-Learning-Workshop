@@ -10,7 +10,7 @@
 #   metrics-nginx.stubstatus-mortgage → nginx stub metrics   (Single/Multi Metric)
 #   logs-mortgage.applications-default→ application logs     (Change Point, Advanced)
 #   metrics-mortgage.services-default → service metrics      (Population, Multi-Metric)
-#   traces-mortgage.spans-default     → APM spans/traces     (Geo, Outlier Detection)
+#   traces-apm-mortgage               → APM transactions+spans (Geo, Outlier Detection)
 #   logs-mortgage.audit-default       → audit/security       (Rare, Classification)
 #   metrics-mortgage.hosts-default    → host system metrics  (Regression, Population)
 #
@@ -745,18 +745,19 @@ workloads:
 
 
   # ===========================================================================
-  # 6. APM SPANS / TRACES  → traces-mortgage.spans-default
-  #    ML techniques: Geo anomaly detection, Outlier Detection (DFA)
-  #    Distributed traces from the LendPath platform with geo-enriched
-  #    source IPs — critical for detecting geo-anomalous loan officer logins
-  #    and applicant session anomalies.
+  # 6a. APM TRANSACTIONS  → traces-apm-mortgage
+  #     processor.event: transaction  — root spans visible in APM > Services,
+  #     Transactions, Trace Waterfall, and Service Map.
+  #     ML techniques: Geo anomaly detection (client.geo.location by user.id)
+  #                    Outlier Detection (DFA) on session behaviour labels
   # ===========================================================================
-  - indexName: traces-mortgage.spans-default
+  - indexName: traces-apm-mortgage
     dataStream: true
     purgeOnStart: false
     workloadThreads: 2
-    workloadSleep: 150
-    elasticsearchBulkQueueDepth: 30
+    workloadSleep: 200
+    elasticsearchBulkQueueDepth: 25
+    peakTime: "10:00:00"
 
     fields:
       - name: "@timestamp"
@@ -766,77 +767,37 @@ workloads:
       - name: ecs.version
         value: "8.11.0"
 
+      # ── APM data_stream (must match traces-apm* pattern) ──────────────────────
       - name: data_stream.type
         value: traces
       - name: data_stream.dataset
-        value: mortgage.spans
+        value: apm
       - name: data_stream.namespace
-        value: default
+        value: mortgage
 
+      # ── processor (REQUIRED by Kibana APM UI) ─────────────────────────────────
+      - name: processor.event
+        value: transaction
+      - name: processor.name
+        value: transaction
+
+      # ── event ─────────────────────────────────────────────────────────────────
       - name: event.kind
         value: event
       - name: event.outcome
         type: random_string_from_list
-        custom_list: "success,success,success,failure,unknown"
+        custom_list: "success,success,success,success,failure,unknown"
       - name: event.duration
         type: long
-        range: "100000,30000000000"    # 0.1ms – 30s
+        range: "1000000,30000000000"   # 1ms – 30s in nanoseconds
 
-      - name: agent.type
+      # ── agent (must be a known APM agent name) ────────────────────────────────
+      - name: agent.name
         value: java
       - name: agent.version
         value: "1.44.0"
-      - name: agent.name
-        type: random_string_from_list
-        custom_list: "lendpath-los,lendpath-underwriting,lendpath-credit-service"
-
-      # ── APM trace hierarchy ───────────────────────────────────────────────────
-      - name: trace.id
+      - name: agent.ephemeral_id
         type: uuid
-      - name: transaction.id
-        type: hash
-      - name: transaction.name
-        type: random_string_from_list
-        custom_list: >
-          "POST /api/v1/applications/submit",
-          "GET /api/v1/rates/current",
-          "POST /api/v1/credit/check",
-          "POST /api/v1/documents/upload",
-          "POST /api/v1/underwriting/decision",
-          "GET /api/v1/appraisal/results",
-          "POST /api/v1/closing/schedule",
-          "GET /api/v1/payments/escrow",
-          "POST /api/v1/title/search",
-          "GET /api/v1/applications/status"
-      - name: transaction.type
-        type: random_string_from_list
-        custom_list: "request,request,request,scheduled,messaging"
-      - name: transaction.duration.us
-        type: long
-        range: "1000,30000000"   # 1ms – 30s in microseconds
-      - name: span.id
-        type: hash
-      - name: span.name
-        type: random_string_from_list
-        custom_list: >
-          "SELECT applications WHERE status",
-          "INSERT INTO loan_applications",
-          "UPDATE application_stage",
-          "Credit Bureau API call",
-          "S3 document upload",
-          "Kafka produce: underwriting-queue",
-          "Kafka consume: decision-results",
-          "Redis GET session",
-          "Redis SET rate-lock",
-          "SMTP notification send",
-          "Webhook callback: LOS partner",
-          "FHA/VA eligibility check"
-      - name: span.type
-        type: random_string_from_list
-        custom_list: "db,db,db,external,storage,messaging,messaging,cache,cache,external,external,external"
-      - name: span.duration.us
-        type: long
-        range: "100,5000000"
 
       # ── service ───────────────────────────────────────────────────────────────
       - name: service.name
@@ -852,15 +813,98 @@ workloads:
         custom_list: "3.1.0,3.1.1,3.2.0,3.2.1"
       - name: service.environment
         value: production
+      - name: service.language.name
+        value: Java
+      - name: service.language.version
+        value: "17.0.8"
+      - name: service.runtime.name
+        value: Java
+      - name: service.runtime.version
+        value: "17.0.8"
+      - name: service.framework.name
+        type: random_string_from_list
+        custom_list: "Spring Boot,Spring Boot,Spring Boot,Micronaut,Quarkus"
+      - name: service.framework.version
+        value: "3.1.5"
+      - name: service.node.name
+        type: random_string_from_list
+        custom_list: "los-app-01,los-app-02,uw-app-01,credit-svc-01,doc-svc-01"
 
+      # ── transaction (REQUIRED for APM Transactions view) ──────────────────────
+      - name: transaction.id
+        type: hash
+      - name: transaction.name
+        type: random_string_from_list
+        custom_list: >
+          POST /api/v1/applications/submit,
+          GET /api/v1/rates/current,
+          POST /api/v1/credit/check,
+          POST /api/v1/documents/upload,
+          POST /api/v1/underwriting/decision,
+          GET /api/v1/appraisal/results,
+          POST /api/v1/closing/schedule,
+          GET /api/v1/payments/escrow,
+          POST /api/v1/title/search,
+          GET /api/v1/applications/status
+      - name: transaction.type
+        type: random_string_from_list
+        custom_list: "request,request,request,request,scheduled,messaging"
+      - name: transaction.duration.us
+        type: long
+        range: "1000,30000000"         # 1ms – 30s in microseconds
+      - name: transaction.result
+        type: random_string_from_list
+        custom_list: "HTTP 2xx,HTTP 2xx,HTTP 2xx,HTTP 4xx,HTTP 5xx"
+      - name: transaction.sampled
+        value: true
+
+      # ── trace hierarchy ────────────────────────────────────────────────────────
+      - name: trace.id
+        type: uuid
+
+      # ── http ──────────────────────────────────────────────────────────────────
+      - name: http.request.method
+        type: random_string_from_list
+        custom_list: "GET,GET,POST,POST,PUT,DELETE"
+      - name: http.response.status_code
+        type: random_integer_from_list
+        custom_list: "200,200,200,201,400,401,403,404,500,502"
+      - name: http.version
+        value: "1.1"
+      - name: url.full
+        type: random_string_from_list
+        custom_list: >
+          https://api.lendpath.com/api/v1/applications/submit,
+          https://api.lendpath.com/api/v1/rates/current,
+          https://api.lendpath.com/api/v1/credit/check,
+          https://api.lendpath.com/api/v1/documents/upload,
+          https://api.lendpath.com/api/v1/underwriting/decision
+      - name: url.path
+        type: random_string_from_list
+        custom_list: >
+          /api/v1/applications/submit,
+          /api/v1/rates/current,
+          /api/v1/credit/check,
+          /api/v1/documents/upload,
+          /api/v1/underwriting/decision
+      - name: url.domain
+        value: api.lendpath.com
+
+      # ── host ──────────────────────────────────────────────────────────────────
       - name: host.hostname
         type: random_string_from_list
         custom_list: "los-app-01,los-app-02,uw-app-01,credit-svc-01,doc-svc-01"
       - name: host.name
         type: random_string_from_list
         custom_list: "los-app-01,los-app-02,uw-app-01,credit-svc-01,doc-svc-01"
+      - name: host.os.platform
+        value: linux
+      - name: host.architecture
+        value: amd64
 
-      # ── geo (critical for geo ML job) ─────────────────────────────────────────
+      # ── geo (ML geo anomaly job) ───────────────────────────────────────────────
+      - name: client.ip
+        type: ipv4
       - name: client.geo.location
         type: geo_point
       - name: client.geo.country_iso_code
@@ -870,12 +914,8 @@ workloads:
         type: city
       - name: client.geo.region_name
         type: state
-      - name: source.ip
-        type: ipv4
-      - name: client.ip
-        type: ipv4
 
-      # ── user context ──────────────────────────────────────────────────────────
+      # ── user ──────────────────────────────────────────────────────────────────
       - name: user.id
         type: random_string_from_list
         custom_list: "LO-001,LO-002,LO-003,LO-004,LO-005,LO-006,LO-007,LO-008,LO-009,LO-010,BORROWER,PROCESSOR,UNDERWRITER"
@@ -885,15 +925,17 @@ workloads:
         type: random_string_from_list
         custom_list: "loan_officer,loan_officer,processor,underwriter,borrower,admin"
 
-      # ── http ─────────────────────────────────────────────────────────────────
-      - name: http.request.method
-        type: random_string_from_list
-        custom_list: "GET,GET,POST,POST,PUT,DELETE"
-      - name: http.response.status_code
-        type: random_integer_from_list
-        custom_list: "200,200,200,201,400,401,403,404,500,502"
+      # ── process ───────────────────────────────────────────────────────────────
+      - name: process.pid
+        type: int
+        range: "1,65535"
+      - name: process.ppid
+        type: int
+        range: "1,65535"
+      - name: process.title
+        value: java
 
-      # ── labels for DFA outlier detection ─────────────────────────────────────
+      # ── labels (DFA outlier detection features) ────────────────────────────────
       - name: labels.loan_amount
         type: float
         range: "75000,2500000"
@@ -911,7 +953,158 @@ workloads:
         range: "0,3"
 
       - name: tags
-        value: mortgage-spans
+        value: apm-transaction
+
+
+  # ===========================================================================
+  # 6b. APM SPANS  → traces-apm-mortgage
+  #     processor.event: span  — child operations visible in Trace Waterfall
+  #     and Service Map (destination.service.resource drives the map edges).
+  # ===========================================================================
+  - indexName: traces-apm-mortgage
+    dataStream: true
+    purgeOnStart: false
+    workloadThreads: 2
+    workloadSleep: 80          # ~3 spans per transaction on average
+    elasticsearchBulkQueueDepth: 60
+
+    fields:
+      - name: "@timestamp"
+        type: timestamp
+        range: "0,1"
+
+      - name: ecs.version
+        value: "8.11.0"
+
+      - name: data_stream.type
+        value: traces
+      - name: data_stream.dataset
+        value: apm
+      - name: data_stream.namespace
+        value: mortgage
+
+      # ── processor (REQUIRED — must be "span" for child operations) ────────────
+      - name: processor.event
+        value: span
+      - name: processor.name
+        value: span
+
+      - name: event.kind
+        value: event
+      - name: event.outcome
+        type: random_string_from_list
+        custom_list: "success,success,success,failure,unknown"
+
+      - name: agent.name
+        value: java
+      - name: agent.version
+        value: "1.44.0"
+      - name: agent.ephemeral_id
+        type: uuid
+
+      - name: service.name
+        type: random_string_from_list
+        custom_list: >
+          lendpath-los,
+          lendpath-underwriting,
+          lendpath-credit-service,
+          lendpath-document-service,
+          lendpath-appraisal-service
+      - name: service.version
+        type: random_string_from_list
+        custom_list: "3.1.0,3.1.1,3.2.0,3.2.1"
+      - name: service.environment
+        value: production
+      - name: service.language.name
+        value: Java
+      - name: service.node.name
+        type: random_string_from_list
+        custom_list: "los-app-01,los-app-02,uw-app-01,credit-svc-01,doc-svc-01"
+
+      # ── span fields (REQUIRED for waterfall) ──────────────────────────────────
+      - name: span.id
+        type: hash
+      - name: span.name
+        type: random_string_from_list
+        custom_list: >
+          SELECT * FROM loan_applications WHERE status = ?,
+          INSERT INTO loan_applications,
+          UPDATE application_stage SET status = ?,
+          Credit Bureau API call,
+          S3 document upload,
+          Kafka produce underwriting-queue,
+          Kafka consume decision-results,
+          Redis GET session,
+          Redis SET rate-lock,
+          SMTP notification send,
+          Webhook callback LOS partner,
+          FHA/VA eligibility check
+      - name: span.type
+        type: random_string_from_list
+        custom_list: "db,db,db,external,storage,messaging,messaging,cache,cache,external,external,external"
+      - name: span.subtype
+        type: random_string_from_list
+        custom_list: "oracle,oracle,oracle,http,s3,kafka,kafka,redis,redis,smtp,http,http"
+      - name: span.duration.us
+        type: long
+        range: "100,5000000"           # 0.1ms – 5s
+      - name: span.action
+        type: random_string_from_list
+        custom_list: "query,query,execute,request,send,send,receive,get,set,send,request,request"
+
+      # ── destination.service (drives the APM Service Map edges) ────────────────
+      - name: destination.service.name
+        type: random_string_from_list
+        custom_list: >
+          oracle:1521,
+          oracle:1521,
+          oracle:1521,
+          https://api.experian.com,
+          https://s3.amazonaws.com,
+          kafka:9092,
+          kafka:9092,
+          redis:6379,
+          redis:6379,
+          smtp.lendpath.internal:587,
+          https://los-partner.lendpath.com,
+          https://api.hud.gov
+      - name: destination.service.resource
+        type: random_string_from_list
+        custom_list: >
+          oracle:1521,
+          oracle:1521,
+          oracle:1521,
+          api.experian.com:443,
+          s3.amazonaws.com:443,
+          kafka:9092,
+          kafka:9092,
+          redis:6379,
+          redis:6379,
+          smtp.lendpath.internal:587,
+          los-partner.lendpath.com:443,
+          api.hud.gov:443
+      - name: destination.service.type
+        type: random_string_from_list
+        custom_list: "db,db,db,external,external,messaging,messaging,cache,cache,external,external,external"
+
+      # ── parent + trace links (REQUIRED for waterfall hierarchy) ───────────────
+      - name: parent.id
+        type: hash
+      - name: transaction.id
+        type: hash
+      - name: trace.id
+        type: uuid
+
+      # ── host ──────────────────────────────────────────────────────────────────
+      - name: host.hostname
+        type: random_string_from_list
+        custom_list: "los-app-01,los-app-02,uw-app-01,credit-svc-01,doc-svc-01"
+      - name: host.name
+        type: random_string_from_list
+        custom_list: "los-app-01,los-app-02,uw-app-01,credit-svc-01,doc-svc-01"
+
+      - name: tags
+        value: apm-span
 
 
   # ===========================================================================
