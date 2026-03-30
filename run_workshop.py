@@ -20,8 +20,10 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import signal
+import yaml
 
 
 def tail_log(path, n=5):
@@ -32,6 +34,43 @@ def tail_log(path, n=5):
         return lines[-n:] if lines else []
     except Exception:
         return []
+
+
+def _patch_sdg_config(sdg_config, host, user, password, verify_ssl, script_dir):
+    """
+    Write a temporary copy of the SDG YAML with connection settings overridden
+    by the values passed on the command line.  Returns the path to the temp file.
+    The caller is responsible for deleting it.
+    """
+    config_path = os.path.join(script_dir, sdg_config)         if not os.path.isabs(sdg_config) else sdg_config
+
+    with open(config_path) as fh:
+        cfg = yaml.safe_load(fh)
+
+    # Parse scheme, host, port out of the --host URL
+    # Accepts:  https://hostname:port  or  http://hostname  or  hostname
+    import re
+    m = re.match(r"(?:(https?)://)?([^:/]+)(?::(\d+))?", host)
+    scheme = m.group(1) or "https"
+    hostname = m.group(2)
+    port = int(m.group(3)) if m.group(3) else (9200)
+
+    cfg["elasticsearchScheme"]   = scheme
+    cfg["elasticsearchHost"]     = hostname
+    cfg["elasticsearchPort"]     = port
+    cfg["elasticsearchUser"]     = user
+    cfg["elasticsearchPassword"] = password
+    cfg["verifyCerts"]           = verify_ssl
+
+    # Write to a named temp file in the same directory so relative paths inside
+    # the YAML (e.g. field value files) still resolve correctly
+    fd, tmp_path = tempfile.mkstemp(
+        suffix=".yml", prefix=".sdg_patched_", dir=script_dir
+    )
+    with os.fdopen(fd, "w") as fh:
+        yaml.dump(cfg, fh, default_flow_style=False, allow_unicode=True)
+
+    return tmp_path
 
 
 def run(host, user, password, verify_ssl, sdg_config, apm_rate, purge_apm=False):
@@ -49,8 +88,16 @@ def run(host, user, password, verify_ssl, sdg_config, apm_rate, purge_apm=False)
 
     python = sys.executable
 
+    # ── Patch SDG YAML with CLI connection settings ───────────────────────────
+    # The SDG reads connection settings from its YAML config, not from argv.
+    # We write a temporary patched copy so the user only has to specify
+    # credentials once (on the run_workshop.py command line).
+    tmp_config = _patch_sdg_config(
+        sdg_config, host, user, password, verify_ssl, script_dir
+    )
+
     # ── Build argument lists ──────────────────────────────────────────────────
-    sdg_cmd = [python, sdg_script, sdg_config]
+    sdg_cmd = [python, sdg_script, tmp_config]
 
     apm_cmd = [
         python, apm_script,
@@ -68,7 +115,7 @@ def run(host, user, password, verify_ssl, sdg_config, apm_rate, purge_apm=False)
     print("\n" + "=" * 60)
     print("  LendPath ML Workshop — Data Generators")
     print("=" * 60)
-    print(f"\n  SDG config:  {sdg_config}")
+    print(f"\n  SDG config:  {sdg_config}  (patched with CLI credentials)")
     print(f"  APM rate:    {apm_rate} trace(s)/sec")
     print(f"  Purge APM:   {'yes — stale traces will be deleted first' if purge_apm else 'no'}")
     print(f"  Target:      {host}")
@@ -108,6 +155,11 @@ def run(host, user, password, verify_ssl, sdg_config, apm_rate, purge_apm=False)
                 proc.kill()
         sdg_log.close()
         apm_log.close()
+        # Remove the temporary patched YAML config
+        try:
+            os.unlink(tmp_config)
+        except Exception:
+            pass
         print("Both generators stopped.")
         print(f"\nFull logs saved to:\n  {sdg_log_path}\n  {apm_log_path}\n")
         sys.exit(0)
