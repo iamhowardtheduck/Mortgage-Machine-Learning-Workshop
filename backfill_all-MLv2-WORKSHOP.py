@@ -213,12 +213,12 @@ def run_backfill(host, user, password, verify_ssl,
     ]
 
     print(f"\n{'='*68}")
-    print(f"  LendPath ML Workshop v2 — 7-Day Historical Backfill")
+    print(f"  LendPath ML Workshop v2 — {days}-Day Historical Backfill")
     print(f"{'='*68}")
     print(f"  Days:              {days}")
     print(f"  SDG weekday/day:   {sdg_target:,} docs")
     print(f"  APM weekday/day:   {apm_traces:,} traces (~{apm_traces*6:,} docs)")
-    print(f"  Peak cap:          {MAX_HOURLY:,} events/hour")
+    print(f"  Peak cap:          {max_hourly:,} events/hour")
     print(f"  Timezone:          {tz_name}")
     print(f"  Target:            {host}")
 
