@@ -158,7 +158,10 @@ def run_backfill(host, user, password, verify_ssl,
                  sdg_pb_threads, apm_pb_threads,
                  sdg_config, then_run,
                  max_hourly=MAX_HOURLY,
-                 sdg_script_path=None):
+                 sdg_script_path=None,
+                 bootstrap_script=None,
+                 kibana_host=None,
+                 job_files=None):
 
     run_script = os.path.join(_HERE, "run_workshop.py")
 
@@ -269,19 +272,84 @@ def run_backfill(host, user, password, verify_ssl,
         print("  ⚠ One or more processes had errors.")
         print("    Review backfill_sdg.log and backfill_apm.log.")
     else:
-        print("  ✓ 7 days of historical data indexed.")
+        print(f"  ✓ {days} days of historical data indexed.")
         print("  ✓ Starting live generators now (continuing from present)…")
     print(f"{'='*68}\n")
 
+    # ── Post-backfill sequence ────────────────────────────────────────────────
+    # Resolve bootstrap script
+    bs = bootstrap_script
+    if bs is None:
+        for _bname in ["bootstrap-MLv2-WORKSHOP.py", "bootstrap.py"]:
+            _bp = os.path.join(_HERE, _bname)
+            if os.path.exists(_bp):
+                bs = _bp
+                break
+
+    bs_common = ["--host", host, "--user", user, "--password", password] \
+                + (["--no-verify-ssl"] if not verify_ssl else []) \
+                + (["--kibana-host", kibana_host] if kibana_host else []) \
+                + (["--skip-kibana"] if not kibana_host else [])
+
+    if job_files:
+        for jf in job_files:
+            bs_common += ["--job-files"] if bs_common[-1] != "--job-files" else []
+        bs_common += ["--job-files"] + job_files
+
+    # ── Step A: Start AD datafeeds ───────────────────────────────────────────
+    if bs and os.path.exists(bs):
+        print(f"\n{'='*68}")
+        print(f"  Post-Backfill Automation")
+        print(f"{'='*68}")
+        print(f"  Bootstrap: {os.path.basename(bs)}")
+        print()
+
+        print("▸ Step 1/3 — Starting AD datafeeds…")
+        try:
+            result = subprocess.run(
+                [PYTHON, bs] + bs_common + ["--start-datafeeds", "--skip-kibana"],
+                cwd=_HERE
+            )
+            if result.returncode == 0:
+                print("  ✓ AD datafeeds started")
+            else:
+                print(f"  ⚠ AD datafeed start returned exit code {result.returncode}")
+        except Exception as e:
+            print(f"  ⚠ Could not start AD datafeeds: {e}")
+
+        # ── Step B: Create and start DFA jobs ─────────────────────────────────
+        print()
+        print("▸ Step 2/3 — Creating and starting DFA jobs…")
+        try:
+            result = subprocess.run(
+                [PYTHON, bs] + bs_common + ["--create-dfa", "--run-dfa", "--skip-kibana"],
+                cwd=_HERE
+            )
+            if result.returncode == 0:
+                print("  ✓ DFA jobs created and started")
+            else:
+                print(f"  ⚠ DFA job creation returned exit code {result.returncode}")
+        except Exception as e:
+            print(f"  ⚠ Could not create DFA jobs: {e}")
+
+        print(f"\n{'='*68}\n")
+    else:
+        print(f"\n  ⚠ bootstrap script not found — skipping AD/DFA automation.")
+        print(f"    Run manually:")
+        print(f"      python bootstrap.py --start-datafeeds ...")
+        print(f"      python bootstrap.py --create-dfa --run-dfa ...")
+        print()
+
+    # ── Step C: Start live generators ────────────────────────────────────────
     if then_run:
         if not os.path.exists(run_script):
             print(f"WARNING: run_workshop.py not found.")
             return
         run_common = ["--host", host, "--user", user, "--password", password] \
                      + (["--no-verify-ssl"] if not verify_ssl else [])
-        if sdg_script_path:
+        if is_v2 and sdg_script_path:
             run_common += ["--sdg-script", sdg_script_path]
-        print("Starting real-time generators (live continuation)…")
+        print("▸ Step 3/3 — Starting live generators (continuing from present)…")
         try:
             subprocess.run([PYTHON, run_script] + run_common, cwd=_HERE)
         except KeyboardInterrupt:
@@ -340,7 +408,16 @@ Examples:
                         "Defaults to system local time. Use --list-timezones to see all options.")
     p.add_argument("--list-timezones", action="store_true",
                    help="Print all available timezone names and exit")
-    p.add_argument("--then-run",      action="store_true", default=True,
+    p.add_argument("--bootstrap-script", default=None, metavar="PATH",
+                   help="Path to bootstrap.py to run after backfill. "
+                        "Auto-detected if not set.")
+    p.add_argument("--kibana-host",    default=None, metavar="URL",
+                   help="Kibana URL for bootstrap post-backfill steps "
+                        "(e.g. http://localhost:5601). Skips Kibana if not set.")
+    p.add_argument("--job-files",      nargs="+", default=None, metavar="FILE",
+                   help="ML job definition files passed to bootstrap. "
+                        "Defaults to bootstrap's own defaults.")
+    p.add_argument("--then-run",       action="store_true", default=True,
                    help="Start live generators immediately after backfill (default: True)")
     p.add_argument("--no-then-run",   action="store_false", dest="then_run",
                    help="Do not start live generators after backfill")
@@ -365,6 +442,9 @@ Examples:
         sdg_pb_threads=args.sdg_pb_threads, apm_pb_threads=args.apm_pb_threads,
         sdg_config=args.sdg_config, then_run=args.then_run,
         sdg_script_path=args.sdg_script,
+        bootstrap_script=args.bootstrap_script,
+        kibana_host=args.kibana_host,
+        job_files=args.job_files,
     )
 
 
