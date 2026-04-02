@@ -360,6 +360,25 @@ def run_backfill(host, user, password, verify_ssl,
         print(f"  Next:  python run_workshop.py {run_common}\n")
 
 
+
+def _load_workshop_config():
+    """Load connection config saved by bootstrap.py."""
+    for search in [
+        os.path.dirname(os.path.realpath(os.path.abspath(__file__))),
+        os.getcwd(),
+    ]:
+        p = os.path.join(search, "workshop-config.json")
+        if os.path.exists(p):
+            try:
+                import json as _json
+                cfg = _json.load(open(p))
+                print(f"  ✓ Loaded config: {p}")
+                return cfg
+            except Exception:
+                pass
+    return {}
+
+
 def main():
     p = argparse.ArgumentParser(
         description="LendPath ML Workshop v2 — 7-day backfill with 10k/hr cap",
@@ -422,7 +441,45 @@ Examples:
     p.add_argument("--no-then-run",   action="store_false", dest="then_run",
                    help="Do not start live generators after backfill")
 
-    args = p.parse_args()
+    # Load previously saved bootstrap config and use as defaults for
+    # any arg the user didn't explicitly pass on the command line.
+    _cfg = _load_workshop_config()
+    if _cfg:
+        # argparse doesn't support post-parse defaults elegantly, so we
+        # patch the namespace directly for args left at their default values.
+        _defaults = {
+            "host":           "https://localhost:9200",
+            "user":           "elastic",
+            "password":       "changeme",
+            "kibana_host":    None,
+            "no_verify_ssl":  False,
+            "timezone":       None,
+            "job_files":      None,
+        }
+        # Parse first so explicit CLI args take priority
+        args = p.parse_args()
+        # Then back-fill from config only where the user left the default
+        if args.host          == _defaults["host"]         and _cfg.get("host"):
+            args.host          = _cfg["host"]
+        if args.user          == _defaults["user"]         and _cfg.get("user"):
+            args.user          = _cfg["user"]
+        if args.password      == _defaults["password"]     and _cfg.get("password"):
+            args.password      = _cfg["password"]
+        if not args.no_verify_ssl and _cfg.get("no_verify_ssl"):
+            args.no_verify_ssl = _cfg["no_verify_ssl"]
+        if not getattr(args, "kibana_host", None) and _cfg.get("kibana_host"):
+            args.kibana_host   = _cfg["kibana_host"]
+        if not getattr(args, "timezone", None) and _cfg.get("timezone"):
+            args.timezone      = _cfg["timezone"]
+        if not getattr(args, "job_files", None) and _cfg.get("job_files"):
+            args.job_files     = _cfg["job_files"]
+    else:
+        args = p.parse_args()
+        if not _cfg:
+            print("  ℹ  No workshop-config.json found — using CLI args only.")
+            print("     Run bootstrap.py first to save connection settings.")
+            print()
+
 
     if args.list_timezones:
         list_timezones()
