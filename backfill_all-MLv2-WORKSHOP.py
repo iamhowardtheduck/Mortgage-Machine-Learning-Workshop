@@ -347,7 +347,7 @@ def run_backfill(host, user, password, verify_ssl,
             return
         run_common = ["--host", host, "--user", user, "--password", password] \
                      + (["--no-verify-ssl"] if not verify_ssl else [])
-        if is_v2 and sdg_script_path:
+        if sdg_script_path:
             run_common += ["--sdg-script", sdg_script_path]
         print("▸ Step 3/3 — Starting live generators (continuing from present)…")
         try:
