@@ -126,7 +126,6 @@ def schedule_preview(days, sdg_weekday, apm_weekday, tz):
     today     = date.today()
     start_day = today - timedelta(days=days - 1)
     tz_name   = getattr(tz, 'key', getattr(tz, 'zone', str(tz)))
-    print(f"\n  Timezone: {tz_name}")
     print(f"\n  {'Date':<12} {'Day':<4} {'Type':<9} {'SDG docs':>10} "
           f"{'APM traces':>11} {'Total':>10} {'Peak /hr':>10}")
     print(f"  {'-'*70}")
