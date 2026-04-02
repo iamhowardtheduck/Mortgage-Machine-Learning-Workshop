@@ -32,11 +32,7 @@ echo
 echo "AWS Bedrock AI Assistant Connector configured as OpenAI"
 echo
 
-# Create Elastic-Agent policies
-curl -X POST "http://localhost:30002/api/fleet/agent_policies?sys_monitoring=true" --header "kbn-xsrf: true"  -H "Content-Type: application/json" -u "sdg:changeme" -d @/root/SDGpy/Agent-Policies/Infra.json
-curl -X POST "http://localhost:30002/api/fleet/agent_policies?sys_monitoring=true" --header "kbn-xsrf: true"  -H "Content-Type: application/json" -u "sdg:changeme" -d @/root/SDGpy/Agent-Policies/SecOps.json
-
 echo
-echo "Elastic-Agent policies Infrastructure & SecOps created"
+echo "You are now ready to move onto the next set of instructions."
 echo
 
