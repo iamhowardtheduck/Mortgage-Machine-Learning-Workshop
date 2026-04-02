@@ -286,14 +286,14 @@ def run_backfill(host, user, password, verify_ssl,
                 bs = _bp
                 break
 
+    tz_str = getattr(tz, 'key', getattr(tz, 'zone', str(tz)))
     bs_common = ["--host", host, "--user", user, "--password", password] \
                 + (["--no-verify-ssl"] if not verify_ssl else []) \
                 + (["--kibana-host", kibana_host] if kibana_host else []) \
-                + (["--skip-kibana"] if not kibana_host else [])
+                + (["--skip-kibana"] if not kibana_host else []) \
+                + ["--timezone", tz_str, "--skip-tz-picker"]
 
     if job_files:
-        for jf in job_files:
-            bs_common += ["--job-files"] if bs_common[-1] != "--job-files" else []
         bs_common += ["--job-files"] + job_files
 
     # ── Step A: Start AD datafeeds ───────────────────────────────────────────
@@ -307,7 +307,7 @@ def run_backfill(host, user, password, verify_ssl,
         print("▸ Step 1/3 — Starting AD datafeeds…")
         try:
             result = subprocess.run(
-                [PYTHON, bs] + bs_common + ["--start-datafeeds", "--skip-kibana"],
+                [PYTHON, bs] + bs_common + ["--skip-kibana"],
                 cwd=_HERE
             )
             if result.returncode == 0:
@@ -322,7 +322,7 @@ def run_backfill(host, user, password, verify_ssl,
         print("▸ Step 2/3 — Creating and starting DFA jobs…")
         try:
             result = subprocess.run(
-                [PYTHON, bs] + bs_common + ["--create-dfa", "--run-dfa", "--skip-kibana"],
+                [PYTHON, bs] + bs_common + ["--create-dfa", "--skip-kibana"],
                 cwd=_HERE
             )
             if result.returncode == 0:
@@ -336,8 +336,8 @@ def run_backfill(host, user, password, verify_ssl,
     else:
         print(f"\n  ⚠ bootstrap script not found — skipping AD/DFA automation.")
         print(f"    Run manually:")
-        print(f"      python bootstrap.py --start-datafeeds ...")
-        print(f"      python bootstrap.py --create-dfa --run-dfa ...")
+        print(f"      python bootstrap.py ...  (then start datafeeds manually in Kibana)")
+        print(f"      python bootstrap.py --create-dfa ...")
         print()
 
     # ── Step C: Start live generators ────────────────────────────────────────
