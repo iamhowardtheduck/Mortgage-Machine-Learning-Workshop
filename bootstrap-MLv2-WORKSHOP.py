@@ -2857,6 +2857,36 @@ def purge(host, auth, verify_ssl,
     print("    python bootstrap.py --host ... --kibana-host ... ...")
     print()
 
+
+# =============================================================================
+# WORKSHOP CONFIG — persist connection args so other scripts reuse them
+# =============================================================================
+
+def _config_path():
+    """Path to workshop-config.json saved alongside this script."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "workshop-config.json")
+
+
+def save_workshop_config(args, selected_tz=None):
+    """Persist bootstrap connection args to workshop-config.json."""
+    cfg = {
+        "host":          args.host,
+        "user":          args.user,
+        "password":      args.password,
+        "no_verify_ssl": getattr(args, "no_verify_ssl", False),
+        "kibana_host":   getattr(args, "kibana_host", None),
+        "job_files":     getattr(args, "job_files", None),
+        "timezone":      selected_tz or getattr(args, "timezone", None),
+    }
+    try:
+        with open(_config_path(), "w") as fh:
+            json.dump(cfg, fh, indent=2)
+        print(f"  ✓ Config saved → {_config_path()}")
+    except Exception as e:
+        print(f"  ⚠ Could not save config: {e}")
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Bootstrap the LendPath ML Workshop — templates + ML jobs",
