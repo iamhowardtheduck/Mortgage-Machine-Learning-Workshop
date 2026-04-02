@@ -1824,8 +1824,15 @@ def _load_job_files(job_files):
         else:
             resolved = path
         if not os.path.exists(resolved):
-            print(f"  ⚠ Job file not found, skipping: {resolved}")
-            continue
+            # Also try cwd as fallback
+            cwd_path = os.path.join(os.getcwd(), path)
+            if os.path.exists(cwd_path):
+                resolved = cwd_path
+            else:
+                print(f"  ✗ Job file not found: {resolved}")
+                print(f"    Also tried: {cwd_path}")
+                print(f"    Ensure all workshop files are in the same directory as bootstrap.py")
+                continue
         with open(resolved) as fh:
             data = json.load(fh)
         anomaly_jobs.extend(data.get("anomaly_detection_jobs", []))
@@ -1995,6 +2002,13 @@ def load_anomaly_jobs(host, auth, verify_ssl, job_files, start_datafeeds=False):
     source indices are populated at creation time.
     """
     print("\n▸ Loading ML job definition files…")
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    for _jf in job_files:
+        _resolved = _jf if os.path.isabs(_jf) else os.path.join(_script_dir, _jf)
+        _cwd      = os.path.join(os.getcwd(), _jf)
+        if not os.path.exists(_resolved) and not os.path.exists(_cwd):
+            print(f"  ✗ MISSING: {_jf}")
+            print(f"    Copy this file to: {_script_dir}")
     anomaly_jobs, _ = _load_job_files(job_files)
 
     if not anomaly_jobs:
@@ -2957,6 +2971,10 @@ Examples:
     print("\n=== LendPath Mortgage ML Workshop v2 — Bootstrap ===")
     print(f"    Target: {args.host}\n")
 
+    # ── Save config for reuse by backfill scripts ─────────────────────────
+    if not args.purge:
+        save_workshop_config(args)
+
     # ── Timezone selection ────────────────────────────────────────────────
     # The selected timezone is passed through to the backfill scripts.
     # It does not affect bootstrap itself (which uses UTC internally) but
@@ -2986,6 +3004,9 @@ Examples:
 
     # Store for downstream use and display in summary
     _selected_tz = selected_tz_name
+    # Update saved config with the resolved timezone
+    if not args.purge:
+        save_workshop_config(args, selected_tz=selected_tz_name)
 
     # ── Purge mode — run and exit ─────────────────────────────────────────────
     if args.purge:
