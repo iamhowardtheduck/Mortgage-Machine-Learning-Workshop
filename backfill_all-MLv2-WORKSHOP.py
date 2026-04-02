@@ -196,19 +196,21 @@ def run_backfill(host, user, password, verify_ssl,
               + ["--timezone", tz_name]
 
     sdg_cmd = [PYTHON, sdg_script] + common + [
-        "--days",              str(days),
-        "--target-per-day",    str(sdg_target),
-        "--workers",           str(sdg_workers),
-        "--bulk-size",         str(sdg_bulk),
+        "--days",                  str(days),
+        "--target-per-day",        str(sdg_target),
+        "--workers",               str(sdg_workers),
+        "--bulk-size",             str(sdg_bulk),
         "--parallel-bulk-threads", str(sdg_pb_threads),
-        "--config",            sdg_config,
+        "--config",                sdg_config,
+        "--max-hourly",            str(max_hourly),
     ]
     apm_cmd = [PYTHON, apm_script] + common + [
-        "--days",              str(days),
-        "--traces-per-day",    str(apm_traces),
-        "--workers",           str(apm_workers),
-        "--bulk-size",         str(apm_bulk),
+        "--days",                  str(days),
+        "--traces-per-day",        str(apm_traces),
+        "--workers",               str(apm_workers),
+        "--bulk-size",             str(apm_bulk),
         "--parallel-bulk-threads", str(apm_pb_threads),
+        "--max-hourly",            str(max_hourly),
     ]
 
     print(f"\n{'='*68}")
