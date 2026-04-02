@@ -209,7 +209,7 @@ def run_backfill(host, user, password, verify_ssl,
         print("▸ Step 1/3 — Starting AD datafeeds…")
         try:
             result = subprocess.run(
-                [PYTHON, bs] + bs_common + ["--start-datafeeds", "--skip-kibana"],
+                [PYTHON, bs] + bs_common + ["--skip-kibana"],
                 cwd=_HERE
             )
             if result.returncode == 0:
@@ -224,7 +224,7 @@ def run_backfill(host, user, password, verify_ssl,
         print("▸ Step 2/3 — Creating and starting DFA jobs…")
         try:
             result = subprocess.run(
-                [PYTHON, bs] + bs_common + ["--create-dfa", "--run-dfa", "--skip-kibana"],
+                [PYTHON, bs] + bs_common + ["--create-dfa", "--skip-kibana"],
                 cwd=_HERE
             )
             if result.returncode == 0:
@@ -238,8 +238,8 @@ def run_backfill(host, user, password, verify_ssl,
     else:
         print(f"\n  ⚠ bootstrap script not found — skipping AD/DFA automation.")
         print(f"    Run manually:")
-        print(f"      python bootstrap.py --start-datafeeds ...")
-        print(f"      python bootstrap.py --create-dfa --run-dfa ...")
+        print(f"      python bootstrap.py ...  (then start datafeeds manually in Kibana)")
+        print(f"      python bootstrap.py --create-dfa ...")
         print()
 
     # ── Step C: Start live generators ────────────────────────────────────────
