@@ -29,7 +29,7 @@ curl -X POST "http://localhost:30920/_security/user/sdg" -H "Content-Type: appli
 bash /opt/workshops/elastic-llm.sh -k false -m gpt-4.1 -d true
 
 echo
-echo "AWS Bedrock AI Assistant Connector configured as OpenAI"
+echo "GPT-4.1 AI Connector configured as OpenAI"
 echo
 
 echo
