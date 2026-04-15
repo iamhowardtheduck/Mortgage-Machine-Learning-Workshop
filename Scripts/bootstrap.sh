@@ -4,9 +4,7 @@ python /workspace/workshop/Mortgage-Machine-Learning-Workshop/bootstrap-prime-mu
   --user sdg \
   --password changeme \
   --kibana-host http://kubernetes-vm:30002 \
-  --no-verify-ssl \
-  --skip-ml \
-  --dfa-types none
+  --no-verify-ssl 
 python /workspace/workshop/Mortgage-Machine-Learning-Workshop/sdg-prime-multilayer.py \
   --host http://kubernetes-vm:30920 \
   --user sdg \
