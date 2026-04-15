@@ -2079,7 +2079,7 @@ def _check_indices_exist(host, auth, verify_ssl, indices):
     return existing, missing
 
 
-def load_dfa_jobs(host, auth, verify_ssl, job_files, run_dfa=False):
+def load_dfa_jobs(host, auth, verify_ssl, job_files, run_dfa=False, dfa_types=None):
     """Create Data Frame Analytics jobs.
 
     IMPORTANT: DFA jobs validate that source indices exist and contain data
@@ -2090,11 +2090,36 @@ def load_dfa_jobs(host, auth, verify_ssl, job_files, run_dfa=False):
       Outlier Detection:  1,000+
       Regression:         1,000+
       Classification:     5,000+  (recommended for a useful model)
+
+    dfa_types: set/list of {"outlier","regression","classification","all","none"}.
+               Filters which job analysis types to create.  None/"all" = all three.
     """
     _, dfa_jobs = _load_job_files(job_files)
 
     if not dfa_jobs:
         print("  ⚠ No DFA jobs found.")
+        return
+
+    # ── Filter by requested DFA type ─────────────────────────────────────────
+    types = {t.lower() for t in (dfa_types or ["all"])}
+    if "none" in types:
+        print("  (--dfa-types none: DFA job creation skipped)")
+        return
+    if "all" not in types:
+        def _job_type(job):
+            analysis = job.get("analysis", {})
+            if "outlier_detection" in analysis: return "outlier"
+            if "regression"        in analysis: return "regression"
+            if "classification"    in analysis: return "classification"
+            return "unknown"
+        before = len(dfa_jobs)
+        dfa_jobs = [j for j in dfa_jobs if _job_type(j) in types]
+        skipped = before - len(dfa_jobs)
+        if skipped:
+            print(f"  ℹ  Filtered to types {sorted(types)}: "
+                  f"{len(dfa_jobs)} job(s) selected, {skipped} skipped.")
+    if not dfa_jobs:
+        print("  ⚠ No DFA jobs match the requested types.")
         return
 
     # ── Pre-flight: verify all source indices exist and have data ─────────────
@@ -2234,21 +2259,41 @@ def _kibana_is_reachable(kibana_host, auth, verify_ssl):
 
 
 
-def create_dfa_data_views(kibana_host, auth, verify_ssl):
+def create_dfa_data_views(kibana_host, auth, verify_ssl, dfa_types=None):
     """
-    Create Kibana data views for all DFA destination indices so the
+    Create Kibana data views for DFA destination indices so the
     Explore Results page can render without the
     "No data view exists for index" error.
+
+    dfa_types: set/list of strings from {"outlier","regression","classification"}.
+               None or {"all"} creates views for all three types.
+               {"none"} skips entirely.
     """
-    # Map of human-readable title → index pattern
-    dfa_views = {
-        "mortgage-spans-outliers":                  "mortgage-spans-outliers",
-        "mortgage-hosts-regression":                "mortgage-hosts-regression",
-        "mortgage-audit-classification":            "mortgage-audit-classification",
-        "mortgage-security-outliers":               "mortgage-security-outliers",
-        "mortgage-oracle-regression":               "mortgage-oracle-regression",
-        "mortgage-privileged-access-classification":"mortgage-privileged-access-classification",
+    # Full catalogue: title -> (index_pattern, job_type)
+    _ALL = {
+        "mortgage-spans-outliers":                   ("mortgage-spans-outliers",                   "outlier"),
+        "mortgage-security-outliers":                ("mortgage-security-outliers",                "outlier"),
+        "mortgage-hosts-regression":                 ("mortgage-hosts-regression",                 "regression"),
+        "mortgage-oracle-regression":                ("mortgage-oracle-regression",                "regression"),
+        "mortgage-audit-classification":             ("mortgage-audit-classification",             "classification"),
+        "mortgage-privileged-access-classification": ("mortgage-privileged-access-classification", "classification"),
     }
+
+    types = {t.lower() for t in (dfa_types or ["all"])}
+    if "none" in types:
+        print("\n  (--dfa-types none: DFA data view creation skipped)")
+        return
+    if "all" in types:
+        types = {"outlier", "regression", "classification"}
+
+    dfa_views = {
+        title: index_pattern
+        for title, (index_pattern, job_type) in _ALL.items()
+        if job_type in types
+    }
+
+    if not dfa_views:
+        return
 
     print("\n▸ Creating Kibana data views for DFA result indices…")
     reachable, info = _kibana_is_reachable(kibana_host, auth, verify_ssl)
@@ -2512,8 +2557,85 @@ def load_kibana_assets(kibana_host, auth, verify_ssl, vega_files):
 
     # Upload Graph workspace alongside Vega visualizations
     load_graph_workspace(kibana_host, auth, verify_ssl)
-    create_dfa_data_views(kibana_host, auth, verify_ssl)
 
+
+def set_kibana_timezone(kibana_host, auth, verify_ssl, tz_name):
+    """
+    Set the Kibana Advanced Setting dateFormat:tz via the Kibana Settings API.
+
+    API:  POST /api/kibana/settings
+    Body: {"changes": {"dateFormat:tz": "<IANA_tz_name>"}}
+
+    Common failure — 400 "not available with the current configuration":
+      This means dateFormat:tz is already locked by a uiSettings.overrides
+      entry in kibana.yml.  When kibana.yml owns a setting the API (and the
+      Advanced Settings UI) cannot change it.
+
+      Fix: remove or update the override in kibana.yml and restart Kibana:
+          uiSettings:
+            overrides:
+              "dateFormat:tz": "America/New_York"   ← change or delete this
+
+      Alternatively you can set it there deliberately — kibana.yml takes
+      effect for all spaces before anyone logs in, which is actually the
+      most reliable approach for a workshop environment.
+    """
+    if not kibana_host:
+        return
+
+    print(f"\n▸ Setting Kibana timezone → {tz_name} …")
+
+    reachable, info = _kibana_is_reachable(kibana_host, auth, verify_ssl)
+    if not reachable:
+        print(f"  ⚠ Cannot reach Kibana: {info} — timezone not set.")
+        return
+
+    status, resp = make_kibana_request(
+        f"{kibana_host}/api/kibana/settings",
+        "POST",
+        {"changes": {"dateFormat:tz": tz_name}},
+        auth,
+        verify_ssl,
+    )
+
+    if status in (200, 201):
+        saved = (resp.get("settings", {})
+                     .get("dateFormat:tz", {})
+                     .get("userValue", tz_name))
+        print(f"  ✓ [{status}] Kibana dateFormat:tz = {saved}")
+        return
+
+    # ── Diagnose the 400 "not available with current configuration" error ──────
+    resp_text = json.dumps(resp).lower()
+    if status == 400 and "not available with the current configuration" in resp_text:
+        print(f"  ⚠ [{status}] Kibana rejected the timezone setting.")
+        print()
+        print("  Cause: dateFormat:tz is locked by a uiSettings.overrides entry")
+        print("  in kibana.yml.  The API cannot change settings that kibana.yml owns.")
+        print()
+        print("  To fix — choose one of:")
+        print()
+        print("  Option A: Remove the override from kibana.yml and restart Kibana")
+        print("    Find and delete/comment out any line like:")
+        print('      uiSettings.overrides."dateFormat:tz": "..."')
+        print("    or the YAML block form:")
+        print("      uiSettings:")
+        print("        overrides:")
+        print('          "dateFormat:tz": "..."')
+        print()
+        print("  Option B: Set it directly in kibana.yml (most reliable for workshops)")
+        print("    Add or update this block in kibana.yml, then restart Kibana:")
+        print("      uiSettings:")
+        print("        overrides:")
+        print(f'          "dateFormat:tz": "{tz_name}"')
+        print()
+        print("  Option C: Set it manually in the Kibana UI")
+        print("    Stack Management → Advanced Settings → dateFormat:tz")
+        print(f"    Set value to: {tz_name}")
+        return
+
+    print(f"  ✗ [{status}] Failed to set Kibana timezone")
+    print(f"      {resp}")
 
 
 # =============================================================================
@@ -2887,6 +3009,450 @@ def save_workshop_config(args, selected_tz=None):
         print(f"  ⚠ Could not save config: {e}")
 
 
+# =============================================================================
+# BACKFILL — inline SDG + APM historical backfill (parallel threads)
+# =============================================================================
+
+def run_backfill_mode(args, auth, verify_ssl):
+    """
+    Run the SDG and APM historical backfills inline — no subprocess, no external
+    backfill_all script required.  Both backfills run in parallel threads so the
+    combined elapsed time is dominated by whichever takes longer.
+
+    Uses business_calendar.py, backfill_sdg.py (compile_field / make_doc),
+    and apm_trace_generator.py — all resolved relative to __file__ so the
+    script works correctly under any name.
+
+    --backfill              run backfill then stop
+    --backfill --livedata   run backfill then hand off to live generators
+    """
+    import importlib.util
+    import signal
+    import threading
+    import random
+    import time
+    import yaml
+    from datetime import datetime, timedelta, timezone
+    from queue import Queue, Empty
+
+    try:
+        from elasticsearch import Elasticsearch
+        from elasticsearch.helpers import parallel_bulk
+    except ImportError:
+        print("ERROR: elasticsearch-py not installed.  Run: pip install elasticsearch")
+        sys.exit(1)
+
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+
+    # ── Helper: import a .py file by path ─────────────────────────────────────
+    def _file_import(name):
+        for search in [_HERE, os.getcwd()]:
+            candidate = os.path.join(search, f"{name}.py")
+            if os.path.exists(candidate):
+                spec = importlib.util.spec_from_file_location(name, candidate)
+                mod  = importlib.util.module_from_spec(spec)
+                sys.modules[name] = mod
+                spec.loader.exec_module(mod)
+                return mod
+        return None
+
+    # ── Load business_calendar ────────────────────────────────────────────────
+    _cal = _file_import("business_calendar")
+    if _cal is None:
+        print("ERROR: business_calendar.py not found alongside bootstrap.")
+        sys.exit(1)
+    day_volume_factor  = _cal.day_volume_factor
+    hour_weights_for_day = _cal.hour_weights_for_day
+
+    # ── Load apm_trace_generator ──────────────────────────────────────────────
+    _apm = _file_import("apm_trace_generator")
+    if _apm is None:
+        print("ERROR: apm_trace_generator.py not found alongside bootstrap.")
+        sys.exit(1)
+    _apm_SERVICES       = _apm.SERVICES
+    _apm_generate_trace = _apm.generate_trace
+    _apm_generate_metrics = _apm.generate_metrics
+
+    # ── Load SDG field compiler (backfill_sdg.py) — optional ─────────────────
+    # If backfill_sdg.py is present we use its compile_field / make_doc / STREAM_WEIGHTS.
+    # If not, we fall back to a minimal inline implementation that handles the
+    # static value fields used by mortgage-workshop.yml.
+    _sdg = _file_import("backfill_sdg")
+    if _sdg is not None:
+        _compile_field  = _sdg.compile_field
+        _make_doc       = _sdg.make_doc
+        _STREAM_WEIGHTS = getattr(_sdg, "STREAM_WEIGHTS", {})
+    else:
+        _STREAM_WEIGHTS = {}
+
+        def _compile_field(f):
+            name  = f.get("name", "")
+            ftype = f.get("type", "value")
+            if name == "@timestamp" or ftype == "timestamp":
+                return (name, None)
+            if ftype == "value" or "value" in f:
+                v = f.get("value")
+                return (name, lambda _v=v: _v)
+            return (name, lambda: None)
+
+        def _make_doc(compiled, ts):
+            doc = {}
+            for key, gen in compiled:
+                val = ts if gen is None else gen()
+                if val is None:
+                    continue
+                parts = key.split(".")
+                d = doc
+                for p in parts[:-1]:
+                    d = d.setdefault(p, {})
+                d[parts[-1]] = val
+            return doc
+
+    # ── Resolve timezone ──────────────────────────────────────────────────────
+    tz_name_arg = getattr(args, "timezone", None)
+    if tz_name_arg:
+        try:
+            import zoneinfo
+            tz = zoneinfo.ZoneInfo(tz_name_arg)
+        except Exception:
+            try:
+                import pytz
+                tz = pytz.timezone(tz_name_arg)
+            except Exception:
+                tz = timezone.utc
+    else:
+        try:
+            import tzlocal
+            tz = tzlocal.get_localzone()
+        except Exception:
+            offset = -time.timezone if not time.daylight else -time.altzone
+            tz = timezone(timedelta(seconds=offset))
+
+    tz_display = getattr(tz, "key", getattr(tz, "zone", str(tz)))
+
+    # ── Parameters ────────────────────────────────────────────────────────────
+    days            = args.backfill_days
+    sdg_tpd         = args.backfill_sdg_target or 56_000
+    apm_tpd         = args.backfill_apm_traces or 4_000
+    max_hourly      = 10_000
+    sdg_workers     = 6
+    apm_workers     = 4
+    bulk_size_sdg   = 1_000
+    bulk_size_apm   = 300
+    pb_threads      = 2
+    pb_queue        = 4
+    sdg_config      = os.path.join(_HERE, "mortgage-workshop.yml")
+    verify_ssl_bool = verify_ssl
+
+    today     = datetime.now(tz).date()
+    start_day = today - timedelta(days=days - 1)
+
+    print(f"\n{'='*68}")
+    print(f"  Bootstrap — Historical Backfill")
+    print(f"{'='*68}")
+    print(f"  Host          : {args.host}")
+    print(f"  Days          : {days}  ({start_day} → {today})")
+    print(f"  SDG target    : {sdg_tpd:,} docs/weekday")
+    print(f"  APM target    : {apm_tpd:,} traces/weekday  (~{apm_tpd*6:,} docs)")
+    print(f"  Peak cap      : {max_hourly:,} events/hour")
+    print(f"  Timezone      : {tz_display}")
+    print(f"  Then live     : {args.livedata}")
+    print()
+
+    ssl_opts = {"verify_certs": verify_ssl_bool, "ssl_show_warn": False}
+    if not verify_ssl_bool:
+        ssl_opts["ssl_assert_fingerprint"] = None
+
+    # ── Shared timestamp helper ────────────────────────────────────────────────
+    def _timestamps_for_day_capped(day_dt, count):
+        """Yield count ISO timestamp strings for day_dt, capped at max_hourly/hr."""
+        day_start_local = datetime(day_dt.year, day_dt.month, day_dt.day, tzinfo=tz)
+        weights  = hour_weights_for_day(day_dt)
+        total_w  = sum(weights)
+        counts, allocated = [], 0
+        for w in weights:
+            n = round(count * w / total_w) if total_w > 0 else 0
+            n = min(n, max_hourly)
+            counts.append(n)
+            allocated += n
+        counts[13] = min(counts[13] + (count - allocated), max_hourly)
+        for hour, n in enumerate(counts):
+            if n <= 0:
+                continue
+            h_utc = (day_start_local + timedelta(hours=hour)).astimezone(timezone.utc)
+            for _ in range(n):
+                ts = h_utc + timedelta(seconds=random.uniform(0, 3599))
+                yield ts.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ts.microsecond//1000:03d}Z"
+
+    # ── SDG backfill ──────────────────────────────────────────────────────────
+    def run_sdg_backfill(progress_q):
+        if not os.path.exists(sdg_config):
+            print(f"  ⚠ SDG config not found: {sdg_config} — skipping SDG backfill")
+            return
+
+        with open(sdg_config) as fh:
+            cfg = yaml.safe_load(fh)
+
+        stream_fields = {}
+        for w in cfg.get("workloads", []):
+            idx = w.get("indexName", "")
+            if idx and idx not in stream_fields:
+                stream_fields[idx] = w.get("fields", [])
+
+        compiled = {idx: [_compile_field(f) for f in fields]
+                    for idx, fields in stream_fields.items()}
+        total_w  = sum(_STREAM_WEIGHTS.get(i, 1.0) for i in stream_fields) or 1
+        targets  = {
+            idx: max(1, round(sdg_tpd * _STREAM_WEIGHTS.get(idx, 1.0) / total_w))
+            for idx in stream_fields
+        }
+
+        es = Elasticsearch(args.host, basic_auth=(args.user, args.password), **ssl_opts)
+
+        def _stream_worker(idx):
+            for d in range(days):
+                day   = start_day + timedelta(days=d)
+                count = min(round(targets[idx] * day_volume_factor(day)), max_hourly * 24)
+                count = max(1, count)
+
+                def _actions(idx=idx, day=day, count=count):
+                    for ts in _timestamps_for_day_capped(day, count):
+                        yield {"_op_type": "create", "_index": idx,
+                               "_source": _make_doc(compiled[idx], ts)}
+
+                try:
+                    for ok, info in parallel_bulk(
+                        es, _actions(),
+                        thread_count=pb_threads, chunk_size=bulk_size_sdg,
+                        queue_size=pb_queue, raise_on_error=False,
+                        raise_on_exception=False, request_timeout=120,
+                    ):
+                        progress_q.put(("SDG", "OK" if ok else f"ERR:{info}"))
+                except Exception as e:
+                    progress_q.put(("SDG", f"ERR:{idx}:{e}"))
+
+        work_q = Queue()
+        for idx in stream_fields:
+            work_q.put(idx)
+
+        def _worker():
+            while True:
+                try:
+                    idx = work_q.get_nowait()
+                except Empty:
+                    return
+                try:
+                    _stream_worker(idx)
+                except Exception as e:
+                    progress_q.put(("SDG", f"ERR:{e}"))
+                finally:
+                    work_q.task_done()
+
+        threads = [threading.Thread(target=_worker, daemon=True)
+                   for _ in range(min(sdg_workers, len(stream_fields)))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    # ── APM backfill ───────────────────────────────────────────────────────────
+    def run_apm_backfill(progress_q):
+        _svc_names   = list(_apm_SERVICES.keys())
+        _svc_weights = [40, 20, 15, 15, 10]
+        es = Elasticsearch(args.host, basic_auth=(args.user, args.password), **ssl_opts)
+
+        def _day_actions(day_dt, count):
+            for ts in _timestamps_for_day_capped(day_dt, count):
+                svc     = random.choices(_svc_names, weights=_svc_weights, k=1)[0]
+                actions = _apm_generate_trace(svc)
+                for action in actions:
+                    action["_source"]["@timestamp"] = ts
+                    yield action
+                if random.random() < 0.02:
+                    for msvc in _svc_names:
+                        yield from _apm_generate_metrics(msvc, ts_iso=ts)
+
+        work_q = Queue()
+        for d in range(days):
+            day   = start_day + timedelta(days=d)
+            count = min(round(apm_tpd * day_volume_factor(day)), max_hourly * 24)
+            work_q.put((day, max(1, count)))
+
+        def _worker():
+            while True:
+                try:
+                    day_dt, count = work_q.get_nowait()
+                except Empty:
+                    return
+                try:
+                    for ok, info in parallel_bulk(
+                        es, _day_actions(day_dt, count),
+                        thread_count=pb_threads, chunk_size=bulk_size_apm,
+                        queue_size=pb_queue, raise_on_error=False,
+                        raise_on_exception=False, request_timeout=120,
+                    ):
+                        progress_q.put(("APM", "OK" if ok else f"ERR:{info}"))
+                except Exception as e:
+                    progress_q.put(("APM", f"ERR:{day_dt}:{e}"))
+                finally:
+                    work_q.task_done()
+
+        threads = [threading.Thread(target=_worker, daemon=True)
+                   for _ in range(min(apm_workers, days))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    # ── Progress printer ──────────────────────────────────────────────────────
+    progress_q = Queue()
+    sdg_ok = sdg_err = apm_ok = apm_err = 0
+    start_time = time.time()
+    _last_print = [time.time()]
+
+    def printer():
+        nonlocal sdg_ok, sdg_err, apm_ok, apm_err
+        while True:
+            try:
+                item = progress_q.get(timeout=1)
+                if item is None:
+                    break
+                stream, result = item
+                if result == "OK":
+                    if stream == "SDG": sdg_ok  += 1
+                    else:               apm_ok  += 1
+                else:
+                    if stream == "SDG": sdg_err += 1
+                    else:               apm_err += 1
+                    if (sdg_err + apm_err) <= 50:
+                        print(f"  ⚠ [{stream}] {result[4:]}")
+                    elif (sdg_err + apm_err) == 51:
+                        print("  (further errors suppressed)")
+                now = time.time()
+                if now - _last_print[0] >= 10:
+                    elapsed = now - start_time
+                    total   = sdg_ok + apm_ok
+                    rate    = total / elapsed if elapsed > 0 else 0
+                    errs    = sdg_err + apm_err
+                    print(f"  {total:>12,} docs  |  {rate:>8,.0f}/sec"
+                          + (f"  |  {errs} errs" if errs else "")
+                          + f"  [SDG {sdg_ok:,}  APM {apm_ok:,}]")
+                    _last_print[0] = now
+            except Empty:
+                continue
+
+    t_print = threading.Thread(target=printer, daemon=True)
+    t_print.start()
+
+    # ── Run SDG and APM in parallel ───────────────────────────────────────────
+    print("▸ Starting SDG and APM backfills in parallel…\n")
+
+    sdg_thread = threading.Thread(
+        target=run_sdg_backfill, args=(progress_q,), daemon=True, name="SDG-backfill"
+    )
+    apm_thread = threading.Thread(
+        target=run_apm_backfill, args=(progress_q,), daemon=True, name="APM-backfill"
+    )
+
+    sdg_thread.start()
+    apm_thread.start()
+
+    try:
+        sdg_thread.join()
+        apm_thread.join()
+    except KeyboardInterrupt:
+        print("\n  Backfill interrupted.")
+        sys.exit(0)
+
+    progress_q.put(None)
+    t_print.join(timeout=10)
+
+    elapsed = time.time() - start_time
+    h, m, s = int(elapsed//3600), int((elapsed%3600)//60), int(elapsed%60)
+    total   = sdg_ok + apm_ok
+    errs    = sdg_err + apm_err
+    rate    = total / elapsed if elapsed > 0 else 0
+
+    print(f"\n{'='*68}")
+    print(f"  Backfill complete.  {h:02d}h {m:02d}m {s:02d}s")
+    print(f"  SDG : {sdg_ok:>12,} docs" + (f"  [{sdg_err} errors]" if sdg_err else ""))
+    print(f"  APM : {apm_ok:>12,} docs" + (f"  [{apm_err} errors]" if apm_err else ""))
+    print(f"  Total: {total:>11,} docs  |  {rate:,.0f} docs/sec")
+    print(f"{'='*68}\n")
+
+    # ── Post-backfill: start AD datafeeds + create DFA jobs ───────────────────
+    # These run inline — no subprocess needed since we are bootstrap.
+    print("▸ Post-backfill: starting AD datafeeds…")
+    load_anomaly_jobs(
+        args.host, auth, verify_ssl,
+        args.job_files,
+        start_datafeeds=True,
+    )
+
+    print("\n▸ Post-backfill: creating DFA jobs…")
+    load_dfa_jobs(
+        args.host, auth, verify_ssl,
+        args.job_files,
+        run_dfa=True,
+        dfa_types=getattr(args, "dfa_types", ["outlier"]),
+    )
+
+    # ── Hand off to live generators if requested ──────────────────────────────
+    if args.livedata:
+        run_livedata_mode(args, verify_ssl)
+
+
+# =============================================================================
+# LIVEDATA — start run_workshop.py as a subprocess
+# =============================================================================
+
+def run_livedata_mode(args, verify_ssl):
+    """
+    Start the live SDG + APM trace generators via run_workshop.py.
+    run_workshop.py is located relative to __file__ so this works regardless
+    of what this script is named.
+    """
+    import subprocess
+
+    _HERE      = os.path.dirname(os.path.abspath(__file__))
+    run_script = os.path.join(_HERE, "run_workshop.py")
+
+    if not os.path.exists(run_script):
+        print("ERROR: run_workshop.py not found alongside bootstrap.")
+        print(f"  Looked in: {_HERE}")
+        sys.exit(1)
+
+    print(f"\n▸ Starting live data generators (run_workshop.py)…")
+    print(f"  Host         : {args.host}")
+    print(f"  APM rate     : {args.livedata_apm_rate} traces/sec")
+    print(f"  Anomaly rate : {args.livedata_anomaly_chance}")
+    if args.livedata_purge_apm:
+        print(f"  APM purge    : yes")
+    print()
+
+    cmd = [
+        sys.executable, run_script,
+        "--host",          args.host,
+        "--user",          args.user,
+        "--password",      args.password,
+        "--apm-rate",      str(args.livedata_apm_rate),
+        "--anomaly-chance", str(args.livedata_anomaly_chance),
+    ]
+    if not verify_ssl:
+        cmd.append("--no-verify-ssl")
+    if args.livedata_purge_apm:
+        cmd.append("--purge-apm")
+    if getattr(args, "livedata_sdg_only", False):
+        cmd.append("--sdg-only")
+    if getattr(args, "livedata_apm_only", False):
+        cmd.append("--apm-only")
+
+    try:
+        subprocess.run(cmd, cwd=_HERE)
+    except KeyboardInterrupt:
+        print("\n  Live generators stopped.")
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Bootstrap the LendPath ML Workshop — templates + ML jobs",
@@ -2947,6 +3513,17 @@ Examples:
     p.add_argument("--run-dfa", action="store_true",
                    help="Immediately start DFA jobs after creating them "
                         "(only meaningful combined with --create-dfa)")
+    p.add_argument("--dfa-types", nargs="+",
+                   choices=["outlier", "regression", "classification", "all", "none"],
+                   default=["outlier"],
+                   metavar="TYPE",
+                   help=(
+                       "Which DFA job types to create and which data views to register. "
+                       "Choices: outlier regression classification all none  "
+                       "(default: outlier). "
+                       "Multiple values allowed, e.g. --dfa-types outlier classification. "
+                       "Use 'all' for all three types, 'none' to skip DFA data views entirely."
+                   ))
     p.add_argument("--job-files", nargs="+",
                    default=["ml-job-definitions-MLv2-WORKSHOP.json",
                             "ml-job-definitions-integrations-MLv2-WORKSHOP.json"],
@@ -2990,6 +3567,48 @@ Examples:
                    help="Vega spec files to upload to Kibana "
                         "(default: lendpath-topology.vega.json "
                         "lendpath-network-topology.vega.json)")
+
+    # ── Backfill flags ─────────────────────────────────────────────────────────
+    p.add_argument("--backfill", action="store_true",
+                   help="Run the SDG and APM historical backfill inline after "
+                        "completing the normal bootstrap steps. Both backfills "
+                        "run in parallel. Combine with --livedata to "
+                        "automatically transition to live generators when done.")
+    p.add_argument("--backfill-days", type=int, default=7, metavar="N",
+                   help="Number of historical days to generate during backfill "
+                        "(default: 7).")
+    p.add_argument("--backfill-sdg-target", type=int, default=None, metavar="N",
+                   help="Weekday SDG documents/day target for backfill "
+                        "(default: 56,000).")
+    p.add_argument("--backfill-apm-traces", type=int, default=None, metavar="N",
+                   help="Weekday APM traces/day target for backfill "
+                        "(default: backfill script default = 4,000). "
+                        "Passed through as --apm-traces.")
+
+    # ── Live data flags ────────────────────────────────────────────────────────
+    p.add_argument("--livedata", action="store_true",
+                   help="Start the live SDG + APM trace generators after "
+                        "bootstrap completes. If combined with --backfill, "
+                        "live generators start automatically once backfill "
+                        "finishes (via --then-run). If used alone, generators "
+                        "start immediately without a backfill.")
+    p.add_argument("--livedata-apm-rate", type=float, default=2.0, metavar="RATE",
+                   help="APM trace generation rate in traces/second "
+                        "(default: 2.0). Passed to run_workshop.py --apm-rate.")
+    p.add_argument("--livedata-anomaly-chance", type=float, default=0.03,
+                   metavar="RATE",
+                   help="Geo anomaly injection rate 0.0–1.0 "
+                        "(default: 0.03 = 3%%). Set higher (e.g. 0.30) during "
+                        "ML demo sessions for stronger anomaly signals.")
+    p.add_argument("--livedata-purge-apm", action="store_true",
+                   help="Delete existing APM traces before starting live "
+                        "generators (clears stale SDG-generated unlinked traces "
+                        "that break the APM Service Map).")
+    p.add_argument("--livedata-sdg-only", action="store_true",
+                   help="Run SDG only during live data phase; skip APM generator.")
+    p.add_argument("--livedata-apm-only", action="store_true",
+                   help="Run APM generator only during live data phase; skip SDG.")
+
     args = p.parse_args()
 
     verify_ssl = not args.no_verify_ssl
@@ -3059,7 +3678,7 @@ Examples:
     # 1. Index templates (always runs)
     setup(args.host, args.user, args.password, verify_ssl)
 
-    # 2. Kibana assets (Vega visualizations)
+    # 2. Kibana assets (Vega visualizations) + timezone + DFA data views
     if args.skip_kibana:
         print("\n  (--skip-kibana: Kibana asset upload skipped)")
     else:
@@ -3067,6 +3686,9 @@ Examples:
             args.kibana_host, auth, verify_ssl,
             args.vega_file,
         )
+        set_kibana_timezone(args.kibana_host, auth, verify_ssl, _selected_tz)
+        create_dfa_data_views(args.kibana_host, auth, verify_ssl,
+                              dfa_types=args.dfa_types)
 
     # 3. ML job creation
     if args.skip_ml:
@@ -3080,11 +3702,13 @@ Examples:
             args.host, auth, verify_ssl,
             args.job_files,
             run_dfa=args.run_dfa,
+            dfa_types=args.dfa_types,
         )
         # Create Kibana data views for DFA result indices so Explore Results works
         if not args.skip_kibana and args.kibana_host:
             kibana_auth = f"Basic {__import__('base64').b64encode(f'{args.user}:{args.password}'.encode()).decode()}"
-            create_dfa_data_views(args.kibana_host, kibana_auth, verify_ssl)
+            create_dfa_data_views(args.kibana_host, kibana_auth, verify_ssl,
+                                  dfa_types=args.dfa_types)
 
     elif args.fix_datafeeds:
         fix_stale_datafeeds(args.host, auth, verify_ssl, args.job_files)
@@ -3134,14 +3758,23 @@ Examples:
     print("Workflow (v2 — 7-day backfill):")
     print(f"  1. python bootstrap-MLv2-WORKSHOP.py ...          (this script)")
     print(f"     → Timezone selected: {_selected_tz}")
-    print(f"  2. python backfill_all-MLv2-WORKSHOP.py \\")
-    print(f"         --host {args.host} --timezone {_selected_tz} ...")
-    print(f"     → Backfills 7 days then immediately goes live")
+    print(f"  2. Add --backfill (and optionally --livedata) to the bootstrap command")
+    print(f"     → Runs SDG + APM backfill inline, then starts live generators")
     print( "  3. Wait a few minutes for initial data")
     print( "  4. Start AD datafeeds in Kibana: ML → Anomaly Detection → Jobs → ▶")
     print( "  5. python bootstrap-MLv2-WORKSHOP.py --create-dfa ...")
     print( "  6. Follow WORKSHOP_GUIDE.md")
     print()
+
+    # ── 5. Backfill (optional) ────────────────────────────────────────────────
+    # --backfill runs the SDG and APM backfills inline in parallel threads,
+    # then starts AD datafeeds and DFA jobs, then optionally goes live.
+    # If only --livedata is set (no --backfill), generators start immediately.
+    if args.backfill:
+        run_backfill_mode(args, auth, verify_ssl)
+    elif args.livedata:
+        # Live-only: no backfill requested, start generators right away
+        run_livedata_mode(args, verify_ssl)
 
 
 if __name__ == "__main__":
