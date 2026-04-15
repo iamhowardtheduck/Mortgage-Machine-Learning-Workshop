@@ -11,8 +11,8 @@ python /workspace/workshop/Mortgage-Machine-Learning-Workshop/sdg-prime-multilay
   --password changeme \
   --no-verify-ssl \
   --days 30 \
-  --apm-traces-per-day 5000 \
-  --edge-events-per-day 20000
+  --apm-traces-per-day 2500 \
+  --edge-events-per-day 5000
   --anomaly-chance 0.05 \
   --bot-attack-chance 0.06 \
   --backfill
